@@ -1,0 +1,17 @@
+.DS_Store
+.last_sync_time
+
+# Local databases and backups
+*.sqlite
+*.sqlite3
+*.db
+*.db3
+
+# Generated/runtime files
+release/
+uploads/
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example

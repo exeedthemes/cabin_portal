@@ -1,0 +1,31 @@
+Options -Indexes
+DirectoryIndex index.php
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+
+    # Prevent external redirection for POST requests to preserve AJAX payloads
+    RewriteCond %{REQUEST_METHOD} !POST
+    RewriteCond %{THE_REQUEST} \s/+(.+?)\.php(?:[\s?]|$) [NC]
+    RewriteRule ^ %1 [R=301,L]
+
+    RewriteCond %{REQUEST_FILENAME} !-d
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteCond %{REQUEST_FILENAME}.php -f
+    RewriteRule ^(.+)$ $1.php [L]
+</IfModule>
+
+<FilesMatch "\.(sqlite|db|bak|backup|py|json|ini|log|sh)$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "^bootstrap\.php$">
+    Require all denied
+</FilesMatch>
+
+<IfModule mod_headers.c>
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    Header always set Permissions-Policy "camera=(self), geolocation=(), microphone=()"
+</IfModule>
