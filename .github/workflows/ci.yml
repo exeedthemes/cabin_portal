@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  syntax:
+    name: Syntax checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.2"
+          extensions: pdo_sqlite, sqlite3, zip
+          coverage: none
+
+      - name: Check PHP syntax
+        run: |
+          find . \
+            -path './.git' -prune -o \
+            -path './release' -prune -o \
+            -path './uploads' -prune -o \
+            -name '*.php' -print0 | xargs -0 -n1 php -l
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Python syntax
+        run: python -m py_compile import_excel.py

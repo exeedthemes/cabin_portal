@@ -9,7 +9,10 @@
 
 # Generated/runtime files
 release/
-uploads/
+uploads/*
+!uploads/.htaccess
+__pycache__/
+*.py[cod]
 
 # Secrets and local environment
 .env
