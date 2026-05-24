@@ -55,32 +55,22 @@ function obfuscate_php_file(string $source, string $target): void {
     file_put_contents($target, $out);
 }
 
-function create_clean_database(string $sourceDb, string $targetDb): void {
-    if (file_exists($targetDb)) {
-        unlink($targetDb);
-    }
-    $source = new PDO('sqlite:' . $sourceDb);
-    $source->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-    $target = new PDO('sqlite:' . $targetDb);
-    $target->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-
-    $schema = $source->query("SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND type IN ('table', 'index') AND name NOT LIKE 'sqlite_%' ORDER BY type DESC, name ASC")->fetchAll(PDO::FETCH_COLUMN);
-    foreach ($schema as $sql) {
-        $target->exec($sql);
+function ensure_local_config(string $root): string {
+    $configPath = $root . '/config.local.php';
+    if (!file_exists($configPath)) {
+        $secret = bin2hex(random_bytes(32));
+        $content = "<?php\nreturn [\n    'api_secret' => '" . $secret . "',\n];\n";
+        file_put_contents($configPath, $content, LOCK_EX);
+        @chmod($configPath, 0600);
     }
 
-    foreach (['settings', 'airlines'] as $table) {
-        $rows = $source->query("SELECT * FROM $table")->fetchAll(PDO::FETCH_ASSOC);
-        foreach ($rows as $row) {
-            $columns = array_keys($row);
-            $placeholders = array_map(fn($column) => ':' . $column, $columns);
-            $stmt = $target->prepare("INSERT INTO $table (" . implode(',', $columns) . ") VALUES (" . implode(',', $placeholders) . ")");
-            foreach ($row as $column => $value) {
-                $stmt->bindValue(':' . $column, $value);
-            }
-            $stmt->execute();
-        }
+    $config = require $configPath;
+    $secret = is_array($config) ? trim((string) ($config['api_secret'] ?? '')) : '';
+    if ($secret === '') {
+        throw new RuntimeException('config.local.php must contain a non-empty api_secret.');
     }
+
+    return $configPath;
 }
 
 rrmdir($releaseDir);
@@ -88,7 +78,9 @@ mkdirp($releaseDir);
 mkdirp($releaseDir . '/uploads/cabin_items');
 mkdirp($releaseDir . '/uploads/branding');
 
-foreach (['index.php', 'api.php', 'staff.php', 'bootstrap.php'] as $file) {
+$configPath = ensure_local_config($root);
+
+foreach (['index.php', 'api.php', 'public_api.php', 'staff.php', 'bootstrap.php', 'mailer.php'] as $file) {
     obfuscate_php_file($root . '/' . $file, $releaseDir . '/' . $file);
 }
 
@@ -99,12 +91,11 @@ foreach (['.htaccess', 'RELEASE_NOTES.md', 'stations.json'] as $file) {
 }
 
 copy_file($root . '/uploads/.htaccess', $releaseDir . '/uploads/.htaccess');
+copy_file($configPath, $releaseDir . '/config.local.php');
 
 if (file_exists($root . '/import_excel.py')) {
     copy_file($root . '/import_excel.py', $releaseDir . '/import_excel.py');
 }
-
-create_clean_database($root . '/cabin_db.sqlite', $releaseDir . '/cabin_db.sqlite');
 
 if (file_exists($zipPath)) {
     unlink($zipPath);

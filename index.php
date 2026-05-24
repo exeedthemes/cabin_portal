@@ -7,6 +7,8 @@ $company_name = $brand_settings['company_name'] ?? 'AeroFind Cabin Recovery';
 $company_short_name = $brand_settings['company_short_name'] ?? 'AeroFind';
 $favicon_url = af_valid_url_or_path($brand_settings['favicon_url'] ?? '');
 $developer_contact_email = filter_var($brand_settings['developer_contact_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $brand_settings['developer_contact_email'] : '';
+$passenger_has_station = af_has_selected_station();
+$active_station = af_get_current_station();
 ?>
 <!DOCTYPE html>
 <html lang="en" class="h-full">
@@ -136,6 +138,15 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
         .animate-card {
             animation: cardIn 0.5s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+        }
+
+        img[data-smooth-image] {
+            opacity: 0;
+            transition: opacity 0.35s ease;
+        }
+
+        img[data-smooth-image].is-loaded {
+            opacity: 1;
         }
 
         .item-card {
@@ -525,7 +536,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                 </h1>
                 <p id="view-title"
                     class="text-[9px] font-black uppercase tracking-widest text-[var(--secondary)] mt-1 hidden xs:block">
-                    Step 1: Select Airline</p>
+                    <?= $passenger_has_station ? 'Step 1: Select Airline' : 'Step 1: Select Station' ?></p>
             </div>
         </div>
 
@@ -548,7 +559,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                                 d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
                         </svg>
                         <span id="current-station-label"
-                            class="hidden md:inline"><?= af_h(af_get_current_station()) ?></span> <span
+                            class="hidden md:inline"><?= $passenger_has_station ? af_h($active_station) : 'Station' ?></span> <span
                             class="text-[8px] opacity-60 hidden md:inline">▼</span>
                     </button>
                     <div id="station-dropdown"
@@ -561,9 +572,9 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                         <div class="py-1 max-h-60 overflow-y-auto custom-scroll">
                             <?php foreach (af_stations() as $code => $name): ?>
                                 <a href="?station=<?= rawurlencode($code) ?>"
-                                    class="flex items-center justify-between px-3.5 py-2.5 text-[9px] uppercase font-black tracking-widest text-[var(--text)] hover:bg-rose-500/10 hover:text-rose-500 transition-colors <?= af_get_current_station() === $code ? 'text-rose-500 font-extrabold' : '' ?>">
+                                    class="flex items-center justify-between px-3.5 py-2.5 text-[9px] uppercase font-black tracking-widest text-[var(--text)] hover:bg-rose-500/10 hover:text-rose-500 transition-colors <?= $passenger_has_station && $active_station === $code ? 'text-rose-500 font-extrabold' : '' ?>">
                                     <span class="truncate"><?= af_h($code) ?> - <?= af_h($name) ?></span>
-                                    <?php if (af_get_current_station() === $code): ?><span>✓</span><?php endif; ?>
+                                    <?php if ($passenger_has_station && $active_station === $code): ?><span>✓</span><?php endif; ?>
                                 </a>
                             <?php endforeach; ?>
                         </div>
@@ -608,9 +619,31 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
     <!-- Main Content Area -->
     <main class="flex-grow overflow-hidden relative">
+        <?php if (!$passenger_has_station): ?>
+            <div id="station-select-view"
+                class="view-transition absolute inset-0 p-4 md:p-8 overflow-y-auto custom-scroll flex items-center justify-center">
+                <div class="w-full max-w-3xl">
+                    <div class="mb-6 text-center">
+                        <p class="text-[10px] font-black uppercase tracking-[0.25em] text-rose-500 mb-2">Passenger Terminal</p>
+                        <h2 class="text-2xl md:text-4xl font-black uppercase tracking-tighter text-[var(--text)]">Select Your Station</h2>
+                        <p class="mt-2 text-xs md:text-sm font-bold text-[var(--secondary)]">Choose the airport station before viewing airline found items.</p>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                        <?php foreach (af_stations() as $code => $name): ?>
+                            <a href="?station=<?= rawurlencode($code) ?>"
+                                class="group rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 transition-all hover:-translate-y-1 hover:border-rose-500/40 hover:shadow-2xl hover:shadow-rose-500/10">
+                                <span class="block text-2xl font-black uppercase tracking-tight text-[var(--text)] group-hover:text-rose-500"><?= af_h($code) ?></span>
+                                <span class="mt-1 block text-xs font-black uppercase tracking-widest text-[var(--secondary)]"><?= af_h($name) ?></span>
+                            </a>
+                        <?php endforeach; ?>
+                    </div>
+                </div>
+            </div>
+        <?php endif; ?>
 
         <!-- View 1: Airline Selection -->
-        <div id="airline-view" class="view-transition absolute inset-0 p-3 md:p-5 overflow-y-auto custom-scroll">
+        <div id="airline-view"
+            class="view-transition absolute inset-0 p-3 md:p-5 overflow-y-auto custom-scroll <?= $passenger_has_station ? '' : 'hidden-view' ?>">
             <div class="mb-4 relative max-w-md mx-auto md:mx-0">
                 <input type="text" id="airline-search" placeholder="Search airline or flight..."
                     class="w-full bg-[var(--input)] border border-[var(--border)] rounded-lg px-10 py-1.5 text-xs text-[var(--text)] focus:border-rose-500/50 transition-all outline-none"
@@ -896,7 +929,9 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
     </div>
 
     <script>
-        const activeStation = '<?= af_h(af_get_current_station()) ?>';
+        const stationSelected = <?= $passenger_has_station ? 'true' : 'false' ?>;
+        const activeStation = '<?= af_h($active_station) ?>';
+        const publicApiCsrfToken = <?= json_encode(af_csrf_token()) ?>;
         let allData = {};
         let passengerViewDays = 30;
         let currentAirlineItems = [];
@@ -980,6 +1015,24 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
             return flight || value || 'N/A';
         }
 
+        function escapeHtml(value) {
+            return String(value ?? '').replace(/[&<>"']/g, char => ({
+                '&': '&amp;',
+                '<': '&lt;',
+                '>': '&gt;',
+                '"': '&quot;',
+                "'": '&#039;'
+            }[char]));
+        }
+
+        function safeUrl(value) {
+            const raw = String(value || '').trim();
+            if (/^https?:\/\//i.test(raw) || /^uploads\/[A-Za-z0-9/_@.-]+$/i.test(raw)) {
+                return raw.replace(/"/g, '%22');
+            }
+            return '';
+        }
+
         function setupDatePlaceholders() {
             document.querySelectorAll('input[data-placeholder]').forEach(input => {
                 const syncType = () => {
@@ -1000,6 +1053,29 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                 input.addEventListener('blur', syncType);
                 input.addEventListener('change', syncType);
                 syncType();
+            });
+        }
+
+        function enhanceSmoothImages(root = document) {
+            root.querySelectorAll('img[loading="lazy"]:not([data-smooth-bound])').forEach(img => {
+                img.dataset.smoothImage = '1';
+                img.dataset.smoothBound = '1';
+                const reveal = () => img.classList.add('is-loaded');
+                if (img.complete && img.naturalWidth > 0) {
+                    requestAnimationFrame(reveal);
+                } else {
+                    img.addEventListener('load', reveal, { once: true });
+                    img.addEventListener('error', reveal, { once: true });
+                }
+            });
+        }
+
+        function animateCards(selector) {
+            requestAnimationFrame(() => {
+                document.querySelectorAll(selector).forEach(card => {
+                    card.classList.remove('opacity-0');
+                    card.classList.add('animate-card');
+                });
             });
         }
 
@@ -1026,12 +1102,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                 }
             });
             setTimeout(() => {
-                document.querySelectorAll('.airline-card').forEach((card, i) => {
-                    setTimeout(() => {
-                        card.classList.remove('opacity-0');
-                        card.classList.add('animate-card');
-                    }, i * 30);
-                });
+                animateCards('.airline-card');
             }, 50);
         }
 
@@ -1051,7 +1122,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
         async function initTerminal() {
             try {
-                const res = await fetch(`api.php?action=getPublicFoundItems&station=${encodeURIComponent(activeStation)}&_=${Date.now()}`);
+                const res = await fetch(`public_api.php?action=getPublicFoundItems&station=${encodeURIComponent(activeStation)}&_=${Date.now()}`);
                 const data = await res.json();
 
                 if (data.success) {
@@ -1092,10 +1163,14 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
             Object.keys(allData).sort().forEach(airlineName => {
                 const group = allData[airlineName];
+                const airlineDisplayName = escapeHtml(group.airline.name || airlineName);
+                const airlineCode = escapeHtml(group.airline.code || '');
+                const logoUrl = safeUrl(group.airline.logo);
+                const fallbackLogo = `https://ui-avatars.com/api/?name=${encodeURIComponent(airlineName)}&background=f1f5f9&color=64748b`;
                 const card = document.createElement('div');
                 card.className = 'airline-card group view-transition opacity-0 p-3.5 md:p-5 flex flex-col items-center justify-center gap-3.5 h-full relative overflow-hidden';
-                card.setAttribute('data-name', group.airline.name);
-                card.setAttribute('data-code', group.airline.code);
+                card.setAttribute('data-name', group.airline.name || airlineName);
+                card.setAttribute('data-code', group.airline.code || '');
                 card.onclick = () => showItems(airlineName);
 
                 const nameLower = airlineName.toLowerCase();
@@ -1105,27 +1180,20 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
                 card.innerHTML = `
                     <div class="logo-container w-11 h-11 md:w-14 md:h-14 bg-[var(--bg)] rounded-2xl flex items-center justify-center p-2.5 border border-[var(--border)] shadow-sm relative z-10">
-                        <img src="${group.airline.logo}" class="w-full h-full object-contain filter" onerror="this.src='https://ui-avatars.com/api/?name=${encodeURIComponent(airlineName)}&background=f1f5f9&color=64748b'">
+                        <img src="${logoUrl || fallbackLogo}" class="w-full h-full object-contain filter" loading="lazy" decoding="async" data-smooth-image onerror="this.src='${fallbackLogo}'">
                     </div>
                     <div class="text-center z-10">
-                        <h3 class="font-black uppercase text-[8px] md:text-[9px] tracking-widest text-[var(--text)] transition-colors line-clamp-1">${group.airline.name}</h3>
+                        <h3 class="font-black uppercase text-[8px] md:text-[9px] tracking-widest text-[var(--text)] transition-colors line-clamp-1">${airlineDisplayName}</h3>
                         <div class="mt-1.5 inline-block px-2 py-0.5 rounded-full" style="background-color: rgba(var(--brand-color-rgb), 0.12);">
-                            <p class="text-[7px] font-black uppercase tracking-tighter" style="color: var(--brand-color);">${group.items.length} Found</p>
+                            <p class="text-[7px] font-black uppercase tracking-tighter" style="color: var(--brand-color);">${group.items.length} Found${airlineCode ? ` · ${airlineCode}` : ''}</p>
                         </div>
                     </div>
                 `;
                 grid.appendChild(card);
+                enhanceSmoothImages(card);
             });
 
-            // Staggered entry animation
-            setTimeout(() => {
-                document.querySelectorAll('.airline-card').forEach((card, i) => {
-                    setTimeout(() => {
-                        card.classList.remove('opacity-0');
-                        card.classList.add('animate-card');
-                    }, i * 30);
-                });
-            }, 100);
+            animateCards('.airline-card');
         }
 
         function showItems(airlineName) {
@@ -1144,16 +1212,20 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
             const group = allData[airlineName];
             const sortedItems = sortItemsByIdDesc(group.items);
+            const airlineDisplayName = escapeHtml(airlineName);
+            const logoUrl = safeUrl(group.airline.logo);
+            const fallbackLogo = `https://ui-avatars.com/api/?name=${encodeURIComponent(airlineName)}`;
 
             header.innerHTML = `
                 <div class="w-8 h-8 bg-[var(--card)] rounded-lg flex items-center justify-center p-1 border border-[var(--border)] shadow-sm shrink-0">
-                    <img src="${group.airline.logo}" alt="${airlineName}" class="w-full h-full object-contain" onerror="this.src='https://ui-avatars.com/api/?name=${encodeURIComponent(airlineName)}'">
+                    <img src="${logoUrl || fallbackLogo}" alt="${airlineDisplayName}" class="w-full h-full object-contain" loading="lazy" decoding="async" data-smooth-image onerror="this.src='${fallbackLogo}'">
                 </div>
                 <div class="text-left">
-                    <h2 class="text-xs font-black uppercase tracking-tighter text-[var(--text)] leading-tight">${airlineName}</h2>
+                    <h2 class="text-xs font-black uppercase tracking-tighter text-[var(--text)] leading-tight">${airlineDisplayName}</h2>
                     <p class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] leading-none">${sortedItems.length} Records</p>
                 </div>
             `;
+            enhanceSmoothImages(header);
 
             grid.innerHTML = '';
             sortedItems.forEach(item => {
@@ -1166,14 +1238,19 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                 const canClaim = item.status === 'Found';
                 const statusLabel = item.status === 'Found' ? 'READY FOR CLAIM' : (item.status === 'Claimed' ? 'CLAIMED' : 'REPORTED LOST');
                 const statusColor = item.status === 'Found' ? 'bg-emerald-500' : (item.status === 'Claimed' ? 'bg-indigo-500' : 'bg-rose-500');
-                const photoUrl = item.photo ? (item.photo.startsWith('http') ? item.photo : `uploads/cabin_items/${item.photo}`) : null;
-                const flightNumber = formatFlightNumber(item.flight_number, airlineName);
+                const photoPath = String(item.photo || '');
+                const photoUrl = photoPath ? safeUrl(/^https?:\/\//i.test(photoPath) ? photoPath : `uploads/cabin_items/${photoPath}`) : null;
+                const flightNumber = escapeHtml(formatFlightNumber(item.flight_number, airlineName));
                 const isIdentityDocument = Boolean(item.is_identity_document) || /^PP-/i.test(item.reference_code || item.id || '');
+                const referenceCode = escapeHtml(item.reference_code || item.id || 'N/A');
+                const rawReferenceCode = String(item.reference_code || item.id || '');
+                const itemDescription = escapeHtml(item.item_description || '');
+                const createdDate = item.created_at ? escapeHtml(String(item.created_at).split(' ')[0]) : 'N/A';
 
                 card.innerHTML = `
                     <div class="item-card-image-wrap bg-[var(--input)] flex items-center justify-center overflow-hidden relative w-full h-[160px] shrink-0">
                         ${photoUrl ? `
-                            <img src="${photoUrl}" ${isIdentityDocument ? '' : 'onclick="zoomImage(this.src)"'} class="w-full h-full object-cover transition-transform duration-700 ${isIdentityDocument ? 'sensitive-doc-photo' : 'group-hover/item:scale-110 cursor-pointer'}">
+                            <img src="${photoUrl}" ${isIdentityDocument ? '' : 'onclick="zoomImage(this.src)"'} class="w-full h-full object-cover transition-transform duration-700 ${isIdentityDocument ? 'sensitive-doc-photo' : 'group-hover/item:scale-110 cursor-pointer'}" loading="lazy" decoding="async" data-smooth-image>
                             ${isIdentityDocument ? `
                                 <div class="sensitive-doc-overlay">
                                     <span class="px-3 py-1.5 rounded-full bg-slate-950/70 text-white text-[7px] font-black uppercase tracking-widest shadow-lg">Image Protected</span>
@@ -1195,15 +1272,15 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                     <div class="item-card-body">
                         <div class="flex items-start justify-between">
                             <div>
-                                <p class="text-[9px] font-black text-rose-500 uppercase tracking-widest leading-none mb-1">${item.reference_code || item.id || 'N/A'}</p>
-                                <h4 class="font-bold text-[var(--text)] text-xs leading-tight line-clamp-2">${item.item_description}</h4>
+                                <p class="text-[9px] font-black text-rose-500 uppercase tracking-widest leading-none mb-1">${referenceCode}</p>
+                                <h4 class="font-bold text-[var(--text)] text-xs leading-tight line-clamp-2">${itemDescription}</h4>
                             </div>
                         </div>
                         <div class="item-card-footer pt-2 flex items-center justify-between gap-3 border-t border-[var(--border)]">
                             <div class="item-card-meta flex min-w-0 items-center gap-4">
                                 <div class="flex flex-col shrink-0">
                                     <span class="text-[7px] font-black uppercase text-[var(--secondary)] tracking-widest mb-0.5">Last Update</span>
-                                    <span class="text-[9px] font-bold text-[var(--text)]">${item.created_at ? item.created_at.split(' ')[0] : 'N/A'}</span>
+                                    <span class="text-[9px] font-bold text-[var(--text)]">${createdDate}</span>
                                 </div>
                                 <div class="flex min-w-0 flex-col">
                                     <span class="text-[7px] font-black uppercase text-[var(--secondary)] tracking-widest mb-0.5">Flight</span>
@@ -1211,7 +1288,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                                 </div>
                             </div>
                             ${canClaim ? `
-                                <button onclick="openClaimModal('${item.reference_code || item.id || ''}', '${encodeURIComponent(item.item_description)}')" class="claim-btn shrink-0 px-3.5 py-1.5 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white rounded-lg text-[8px] font-black uppercase tracking-widest transition-all">Claim Item</button>
+                                <button onclick="openClaimModal('${escapeHtml(rawReferenceCode)}', '${encodeURIComponent(item.item_description || '')}')" class="claim-btn shrink-0 px-3.5 py-1.5 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white rounded-lg text-[8px] font-black uppercase tracking-widest transition-all">Claim Item</button>
                             ` : `
                                 <button disabled class="claim-btn shrink-0 px-3.5 py-1.5 bg-slate-800 text-slate-500 rounded-lg text-[8px] font-black uppercase tracking-widest cursor-not-allowed">${item.status}</button>
                             `}
@@ -1219,6 +1296,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                     </div>
                 `;
                 grid.appendChild(card);
+                enhanceSmoothImages(card);
             });
 
             // Transition
@@ -1246,6 +1324,11 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
         }
 
         async function showReportForm() {
+            if (!stationSelected) {
+                toast.warning('Please select a station first.');
+                return;
+            }
+
             const airlineView = document.getElementById('airline-view');
             const itemView = document.getElementById('item-view');
             const reportView = document.getElementById('report-view');
@@ -1253,12 +1336,12 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
             // Load airlines for dropdown
             try {
-                const res = await fetch(`api.php?action=getAirlines&station=${encodeURIComponent(activeStation)}`);
+                const res = await fetch(`public_api.php?action=getAirlines&station=${encodeURIComponent(activeStation)}`);
                 const data = await res.json();
                 const select = document.getElementById('report-airlines');
                 select.innerHTML = '<option value="">Select Airline...</option>';
                 data.airlines.forEach(al => {
-                    select.innerHTML += `<option value="${al.name}">${al.name}</option>`;
+                    select.innerHTML += `<option value="${escapeHtml(al.code)}">${escapeHtml(al.name)} (${escapeHtml(al.code)})</option>`;
                 });
             } catch (e) { }
 
@@ -1267,6 +1350,47 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
             itemView.classList.add('hidden-view');
             reportView.classList.remove('hidden-view');
             reportView.style.display = 'flex';
+        }
+
+        const PHOTO_COMPRESS_MAX_DIMENSION = 1280;
+        const PHOTO_COMPRESS_QUALITY = 0.68;
+
+        function canBrowserCompressImage(file) {
+            return file
+                && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+                && typeof createImageBitmap === 'function'
+                && typeof DataTransfer !== 'undefined';
+        }
+
+        async function compressImageFile(file) {
+            if (!canBrowserCompressImage(file)) return file;
+            const bitmap = await createImageBitmap(file);
+            const scale = Math.min(1, PHOTO_COMPRESS_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+            const width = Math.max(1, Math.round(bitmap.width * scale));
+            const height = Math.max(1, Math.round(bitmap.height * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d', { alpha: false });
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(bitmap, 0, 0, width, height);
+            bitmap.close?.();
+
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', PHOTO_COMPRESS_QUALITY));
+            if (!blob || blob.size >= file.size) return file;
+            const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+            return new File([blob], name, { type: 'image/jpeg', lastModified: Date.now() });
+        }
+
+        async function compressedFormData(form) {
+            const formData = new FormData(form);
+            const input = form.querySelector('input[type="file"][name="photo"]');
+            const file = input?.files?.[0];
+            if (file) {
+                formData.set('photo', await compressImageFile(file));
+            }
+            return formData;
         }
 
         function updateFileLabel(input) {
@@ -1283,11 +1407,12 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
         async function submitLostReport(e) {
             e.preventDefault();
             const form = e.target;
-            const formData = new FormData(form);
+            const formData = await compressedFormData(form);
             formData.append('action', 'reportLost');
+            formData.append('csrf_token', publicApiCsrfToken);
 
             try {
-                const res = await fetch(`api.php?station=${encodeURIComponent(activeStation)}`, {
+                const res = await fetch(`public_api.php?station=${encodeURIComponent(activeStation)}`, {
                     method: 'POST',
                     body: formData
                 });
@@ -1409,9 +1534,10 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
 
             const formData = new FormData(form);
             formData.append('action', 'claimItem');
+            formData.append('csrf_token', publicApiCsrfToken);
 
             try {
-                const res = await fetch(`api.php?station=${encodeURIComponent(activeStation)}`, {
+                const res = await fetch(`public_api.php?station=${encodeURIComponent(activeStation)}`, {
                     method: 'POST',
                     body: formData
                 });
@@ -1421,7 +1547,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                     if (result.email_warning) {
                         toast.warning(result.email_warning);
                     } else {
-                        toast.success(`Claim registered successfully! A confirmation email containing pickup location details has been sent to ${formData.get('pax_email')}.`);
+                        toast.success(`Claim request submitted. Staff will verify ownership before releasing the item.`);
                     }
                     closeClaimModal();
 
@@ -1528,7 +1654,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                     ${iconHtml}
                     <div class="flex flex-col flex-grow min-w-0 pr-4">
                         <span class="text-[10px] font-black uppercase tracking-widest opacity-80 leading-tight">${titleText}</span>
-                        <span class="text-xs font-semibold text-slate-100 mt-1 leading-relaxed break-words">${message}</span>
+                        <span class="text-xs font-semibold text-slate-100 mt-1 leading-relaxed break-words">${escapeHtml(message)}</span>
                     </div>
                     <button class="text-slate-400 hover:text-slate-200 transition-colors text-base font-bold leading-none shrink-0 self-center">&times;</button>
                     <div class="toast-progress ${progressBg}" style="animation-duration: ${duration}ms;"></div>
@@ -1563,7 +1689,7 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
                     ${iconHtml}
                     <div class="flex flex-col flex-grow min-w-0 pr-4">
                         <span class="text-[10px] font-black uppercase tracking-widest opacity-80 leading-tight">${titleText}</span>
-                        <span class="text-xs font-semibold text-slate-100 mt-1 leading-relaxed break-words">${message}</span>
+                        <span class="text-xs font-semibold text-slate-100 mt-1 leading-relaxed break-words">${escapeHtml(message)}</span>
                         <div class="flex items-center gap-2 mt-3">
                             <button class="confirm-btn px-3 py-1.5 bg-rose-500 hover:bg-rose-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all shadow-md shadow-rose-500/20 hover:scale-[1.03] active:scale-[0.98]">Yes, Delete</button>
                             <button class="cancel-btn px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all hover:scale-[1.03] active:scale-[0.98]">Cancel</button>
@@ -1627,7 +1753,10 @@ $developer_contact_email = filter_var($brand_settings['developer_contact_email']
             }
         };
 
-        initTerminal();
+        if (stationSelected) {
+            initTerminal();
+        }
+        enhanceSmoothImages();
     </script>
 </body>
 

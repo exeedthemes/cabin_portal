@@ -20,7 +20,8 @@ The repository intentionally does not include production databases, uploaded pas
 .
 |-- index.php              # Passenger terminal
 |-- staff.php              # Staff dashboard and admin workflows
-|-- api.php                # JSON API actions
+|-- api.php                # Secret-protected JSON API actions
+|-- public_api.php         # Narrow passenger proxy with CSRF protection
 |-- bootstrap.php          # Shared database, settings, session, and security helpers
 |-- privacy.php            # Privacy notice
 |-- build_release.php      # Local release package builder
@@ -51,6 +52,9 @@ On first access, the app creates the required SQLite database locally. Database 
 
 - Edit `stations.json` to add or rename supported stations.
 - Use staff settings in the app to configure branding, SMTP, notification emails, and airline records.
+- `build_release.php` creates `config.local.php` with a strong server-only API secret if one does not already exist.
+- Direct `api.php` calls require the secret. Send it as `Authorization: Bearer <secret>` or `X-API-Secret: <secret>` from trusted server-side code.
+- The passenger terminal uses `public_api.php`, which only exposes the passenger actions and requires same-site CSRF tokens for writes.
 - Keep `.env`, SQLite files, uploads, release bundles, and email logs out of source control.
 
 ## Development Checks
@@ -63,7 +67,7 @@ python3 -m py_compile import_excel.py
 php build_release.php
 ```
 
-`php build_release.php` requires a local `cabin_db.sqlite` because the release builder copies a clean database schema/settings snapshot into the release bundle.
+`php build_release.php` creates a code-only release bundle. Runtime SQLite databases, uploads, email logs, and local backups are not included; the first staff visit provisions the database and asks for an admin account.
 
 ## Documentation
 

@@ -1,5 +1,22 @@
 # AeroFind Cabin Recovery Portal - Release Notes
 
+## [1.7.0] - 2026-05-24
+### 🚀 Automated Multi-Station Database Backups & Isolated Restoration
+- **Automated Multi-Station Backups**: Built a dynamic, per-station automatic SQLite backup utility. The background runner evaluates and replicates each station's active database independently into localized backup files (e.g., `cabin_db_backup_FRA.sqlite`), ensuring absolute data isolation across airport terminals.
+- **Configurable Backup Intervals**: Introduced a new system setting, `database_backup_interval_days` (defaulting to 7 days, set to 0 to disable), which can be managed directly by administrators in the System Configuration panel.
+- **Rate-Limited Background Execution**: Registered the automated backup hook within `bootstrap.php` to trigger asynchronously on web requests. The execution check is rate-limited via a lock-file system to run at most once per hour, ensuring zero performance impact on regular page loads.
+- **Station-Aware Manual Backups & Restore**: Upgraded manual operations in the staff dashboard—such as Excel auto-sync backups and the manual database restore action—to correctly reference the active station's backup file rather than a single hardcoded master file.
+
+## [1.6.0] - 2026-05-24
+### 🚀 Multi-Station Architecture & Enterprise Security Hardening
+- **Narrow Proxy API (`public_api.php`)**: Implemented a security-hardened proxy layer for all public/passenger interactions. The new passenger portal route restricts accessible actions exclusively to public-safe calls and enforces strict same-site CSRF validation, mitigating API exposure risks.
+- **Server-Only API Access Protection**: Hardened direct `api.php` endpoints with a strong, auto-generated server-to-server API secret (`config.local.php`). External systems must authenticate via `Authorization: Bearer` or `X-API-Secret` headers.
+- **Multi-Station & Courier Isolation**: Enhanced backend queries (`dbGetBDOCouriers`, staff dashboard filters) to strictly partition and isolate data dynamically per-station. Station-scoped staff and supervisors are locked into their active stations, preventing cross-station leakage.
+- **Clean Code & Modular Mailer (`mailer.php`)**: Extracted and centralized all transactional email composition and transport components (supporting PHP `mail()` and direct socket SMTP TLS/SSL) into a dedicated module, optimizing application boot performance and cleaner isolation.
+- **Dynamic Range Pagination**: Replaced the static relative row-count pagination footer with an intuitive, dynamic range indicator (e.g., displaying "21-30 / 145 rows" instead of "10/145 rows"), providing staff with absolute viewport visibility.
+- **Harden Password Requirements**: Implemented strict, enterprise-ready password validation rules during initial admin provisioning requiring a minimum length of 12 characters.
+- **Configuration & Directory Security**: Hardened `.htaccess` directives to fully restrict direct web access to `.env`, `config.local.php`, `bootstrap.php`, and sensitive local database or backup SQLite files.
+
 ## [1.5.1] - 2026-05-22
 ### 🚀 Visual Polish & Portal Cleanup
 - **Purged Globe Emojis**: Removed the last colorful `🌐` emojis from both the passenger portal and the staff portal settings modals for a cleaner, modern interface.

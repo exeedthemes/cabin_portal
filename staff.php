@@ -1,9 +1,11 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/mailer.php';
 af_security_headers();
 af_start_secure_session();
 
-$db_file = __DIR__ . '/cabin_db.sqlite';
+$active_station = af_get_current_station();
+$db_file = af_station_db_file($active_station);
 $pdo = af_db();
 $db_settings = af_settings($pdo);
 
@@ -27,6 +29,46 @@ function normalize_tag($tag)
     }
 
     return $tag;
+}
+
+function find_existing_item_tag(PDO $pdo, $tag)
+{
+    $normalized = normalize_tag($tag);
+    if ($normalized === '') {
+        return '';
+    }
+
+    $candidates = [$normalized];
+    if (preg_match('/^\d+$/', $normalized)) {
+        $candidates[] = 'ID-' . $normalized;
+    }
+
+    $stmt = $pdo->prepare("SELECT tag_no FROM items WHERE tag_no = ? LIMIT 1");
+    foreach (array_unique($candidates) as $candidate) {
+        $stmt->execute([$candidate]);
+        $stored_tag = $stmt->fetchColumn();
+        if ($stored_tag) {
+            return $stored_tag;
+        }
+    }
+
+    if (preg_match('/^(?:ID-)?(\d+)$/', $normalized, $matches)) {
+        $stmt = $pdo->prepare("
+            SELECT tag_no
+            FROM items
+            WHERE tag_no GLOB 'ID-[0-9]*'
+              AND CAST(substr(tag_no, 4) AS INTEGER) = ?
+            ORDER BY LENGTH(tag_no) ASC, tag_no ASC
+            LIMIT 1
+        ");
+        $stmt->execute([(int) $matches[1]]);
+        $stored_tag = $stmt->fetchColumn();
+        if ($stored_tag) {
+            return $stored_tag;
+        }
+    }
+
+    return '';
 }
 
 function next_item_tag(PDO $pdo)
@@ -90,180 +132,32 @@ function remove_claim_request_notes($notes)
     return implode("\n", $kept);
 }
 
-function staff_email_plain_text($body_html)
+function normalize_saved_flight_info(PDO $pdo, $other_info)
 {
-    $text = preg_replace('/<\s*br\s*\/?>/i', "\n", $body_html);
-    $text = preg_replace('/<\/\s*(p|div|h[1-6]|tr|table)\s*>/i', "\n", $text);
-    $text = html_entity_decode(strip_tags($text), ENT_QUOTES | ENT_HTML5, 'UTF-8');
-    $text = preg_replace("/[ \t]+/", ' ', $text);
-    $text = preg_replace("/\n{3,}/", "\n\n", $text);
-    return trim($text);
-}
-
-function send_staff_php_mail($to, $subject, $body_html, $from)
-{
-    $to = trim((string) $to);
-    $from = trim((string) $from);
-    if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
-        return false;
+    $other_info = trim((string) $other_info);
+    if ($other_info === '') {
+        return '';
     }
 
-    $safe_from = filter_var($from, FILTER_VALIDATE_EMAIL) ? $from : 'noreply@aerofind.online';
-    $safe_subject = str_replace(["\r", "\n"], ' ', $subject);
-    $domain = substr(strrchr($safe_from, "@"), 1) ?: 'aerofind.online';
-    $boundary = 'af_' . bin2hex(random_bytes(12));
-    $message_id = sprintf('<%s.%s@%s>', time(), bin2hex(random_bytes(6)), $domain);
-
-    $headers = [];
-    $headers[] = "From: AeroFind Cabin Recovery <$safe_from>";
-    $headers[] = "Reply-To: $safe_from";
-    $headers[] = "Date: " . date(DATE_RFC2822);
-    $headers[] = "Message-ID: $message_id";
-    $headers[] = "MIME-Version: 1.0";
-    $headers[] = "Content-Type: multipart/alternative; boundary=\"$boundary\"";
-    $headers[] = "X-Mailer: AeroFind Cabin Portal";
-
-    $body = "--$boundary\r\n";
-    $body .= "Content-Type: text/plain; charset=UTF-8\r\n";
-    $body .= "Content-Transfer-Encoding: 8bit\r\n\r\n";
-    $body .= staff_email_plain_text($body_html) . "\r\n\r\n";
-    $body .= "--$boundary\r\n";
-    $body .= "Content-Type: text/html; charset=UTF-8\r\n";
-    $body .= "Content-Transfer-Encoding: 8bit\r\n\r\n";
-    $body .= $body_html . "\r\n\r\n";
-    $body .= "--$boundary--";
-
-    $header_text = str_replace("\r\n", "\n", implode("\r\n", $headers));
-    $sent = @mail($to, $safe_subject, $body, $header_text, "-f$safe_from");
-    if (!$sent) {
-        $sent = @mail($to, $safe_subject, $body, $header_text);
-    }
-
-    $mail_dir = __DIR__ . '/uploads/emails';
-    if (!is_dir($mail_dir)) {
-        @mkdir($mail_dir, 0755, true);
-    }
-    $safe_to = preg_replace('/[^A-Za-z0-9_-]/', '_', $to);
-    $safe_file_subject = preg_replace('/[^A-Za-z0-9_-]/', '_', substr($safe_subject, 0, 32));
-    $mail_filename = $mail_dir . '/' . time() . '_' . $safe_to . '_' . $safe_file_subject . '.eml';
-    @file_put_contents($mail_filename, "To: $to\nSubject: $safe_subject\n$header_text\n\n$body");
-
-    return $sent;
-}
-
-function send_staff_configured_email($to, $subject, $body_html, array $settings): array
-{
-    $to = trim((string) $to);
-    if (!filter_var($to, FILTER_VALIDATE_EMAIL)) {
-        return ['sent' => false, 'method' => 'none', 'error' => "Invalid recipient email address: $to"];
-    }
-
-    $method = $settings['email_delivery_method'] ?? 'php_mail';
-    $from = $settings['smtp_from_email'] ?? 'noreply@aerofind.online';
-    if ($method !== 'smtp' || empty($settings['smtp_host'])) {
-        $sent = send_staff_php_mail($to, $subject, $body_html, $from);
-        return ['sent' => $sent, 'method' => 'php_mail', 'error' => $sent ? '' : 'PHP mail() did not confirm delivery.'];
-    }
-
-    $host = trim($settings['smtp_host']);
-    $port = (int) ($settings['smtp_port'] ?? '587');
-    $user = trim($settings['smtp_user'] ?? '');
-    $pass = $settings['smtp_password'] ?? '';
-    $encryption = $settings['smtp_encryption'] ?? 'tls';
-    $safe_from = filter_var($from, FILTER_VALIDATE_EMAIL) ? $from : 'noreply@aerofind.online';
-
-    try {
-        $socket_host = $encryption === 'ssl' ? 'ssl://' . $host : $host;
-        $socket = @fsockopen($socket_host, $port, $errno, $errstr, 8);
-        if (!$socket) {
-            return ['sent' => false, 'method' => 'smtp', 'error' => "Could not connect to SMTP server $host:$port ($errno: $errstr)"];
+    $airlines = $pdo->query("SELECT name, code FROM airlines ORDER BY LENGTH(name) DESC")->fetchAll(PDO::FETCH_ASSOC);
+    foreach ($airlines as $airline) {
+        $name = trim((string) ($airline['name'] ?? ''));
+        $code = trim((string) ($airline['code'] ?? ''));
+        if ($name !== '' && stripos($other_info, $name) === 0) {
+            return trim(strtoupper($code) . substr($other_info, strlen($name)));
         }
-        stream_set_timeout($socket, 10);
-        $read_resp = function ($socket) {
-            $data = '';
-            while ($str = fgets($socket, 515)) {
-                $data .= $str;
-                if (substr($str, 3, 1) === ' ') {
-                    break;
-                }
-            }
-            return $data;
-        };
-        $expect = function ($socket, $codes, $step) use ($read_resp) {
-            $response = $read_resp($socket);
-            foreach ((array) $codes as $code) {
-                if (strpos($response, (string) $code) === 0) {
-                    return;
-                }
-            }
-            throw new Exception("$step failed: " . trim($response));
-        };
-
-        $expect($socket, 220, 'SMTP banner');
-        fwrite($socket, "EHLO " . ($_SERVER['SERVER_NAME'] ?: 'localhost') . "\r\n");
-        $expect($socket, 250, 'EHLO');
-        if ($encryption === 'tls') {
-            fwrite($socket, "STARTTLS\r\n");
-            $expect($socket, 220, 'STARTTLS');
-            if (!@stream_socket_enable_crypto($socket, true, STREAM_CRYPTO_METHOD_TLS_CLIENT)) {
-                throw new Exception('STARTTLS failed');
-            }
-            fwrite($socket, "EHLO " . ($_SERVER['SERVER_NAME'] ?: 'localhost') . "\r\n");
-            $expect($socket, 250, 'EHLO after STARTTLS');
+        if ($code !== '' && stripos($other_info, $code) === 0) {
+            return trim(strtoupper($code) . substr($other_info, strlen($code)));
         }
-        if ($user !== '' && $pass !== '') {
-            fwrite($socket, "AUTH LOGIN\r\n");
-            $expect($socket, 334, 'AUTH LOGIN');
-            fwrite($socket, base64_encode($user) . "\r\n");
-            $expect($socket, 334, 'SMTP username');
-            fwrite($socket, base64_encode($pass) . "\r\n");
-            $expect($socket, 235, 'SMTP authentication');
-        } elseif ($user !== '' || $pass !== '') {
-            throw new Exception('SMTP username and password must both be set.');
-        }
-
-        fwrite($socket, "MAIL FROM: <$safe_from>\r\n");
-        $expect($socket, 250, 'MAIL FROM');
-        fwrite($socket, "RCPT TO: <$to>\r\n");
-        $expect($socket, [250, 251], 'RCPT TO');
-        fwrite($socket, "DATA\r\n");
-        $expect($socket, 354, 'DATA');
-
-        $safe_subject = str_replace(["\r", "\n"], ' ', $subject);
-        $domain = substr(strrchr($safe_from, "@"), 1) ?: 'aerofind.online';
-        $boundary = 'af_' . bin2hex(random_bytes(12));
-        $headers = [
-            "To: <$to>",
-            "Subject: $safe_subject",
-            "From: AeroFind Cabin Recovery <$safe_from>",
-            "Reply-To: $safe_from",
-            "Date: " . date(DATE_RFC2822),
-            "Message-ID: <" . time() . "." . bin2hex(random_bytes(6)) . "@$domain>",
-            "MIME-Version: 1.0",
-            "Content-Type: multipart/alternative; boundary=\"$boundary\"",
-            "X-Mailer: AeroFind Cabin Portal"
-        ];
-        $body = "--$boundary\r\n";
-        $body .= "Content-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n";
-        $body .= staff_email_plain_text($body_html) . "\r\n\r\n";
-        $body .= "--$boundary\r\n";
-        $body .= "Content-Type: text/html; charset=UTF-8\r\nContent-Transfer-Encoding: 8bit\r\n\r\n";
-        $body .= $body_html . "\r\n\r\n--$boundary--";
-        fwrite($socket, implode("\r\n", $headers) . "\r\n\r\n" . preg_replace('/^\./m', '..', $body) . "\r\n.\r\n");
-        $expect($socket, 250, 'Message delivery');
-        fwrite($socket, "QUIT\r\n");
-        fclose($socket);
-        return ['sent' => true, 'method' => 'smtp', 'error' => ''];
-    } catch (Exception $e) {
-        if (isset($socket) && is_resource($socket)) {
-            fclose($socket);
-        }
-        return ['sent' => false, 'method' => 'smtp', 'error' => $e->getMessage()];
     }
+
+    return $other_info;
 }
 
 $staff_username = $db_settings['staff_username'] ?? 'admin';
 $staff_password_hash = $db_settings['staff_password_hash'] ?? '';
+$supervisor_username = $db_settings['supervisor_username'] ?? '';
+$supervisor_password_hash = $db_settings['supervisor_password_hash'] ?? '';
 $admin_username = $db_settings['admin_username'] ?? 'admin';
 $admin_password_hash = $db_settings['admin_password_hash'] ?? '';
 $company_name = $db_settings['company_name'] ?? 'AeroFind Cabin Recovery';
@@ -293,7 +187,7 @@ function station_login_settings(string $station): ?array
     }
 }
 
-function find_staff_login_station(string $username, string $password): ?string
+function find_station_role_login(string $username, string $password, string $role): ?string
 {
     $stations = af_stations();
     $current_station = af_get_current_station();
@@ -307,14 +201,205 @@ function find_staff_login_station(string $username, string $password): ?string
             continue;
         }
 
-        $station_staff_username = (string) ($settings['staff_username'] ?? '');
-        $station_staff_hash = (string) ($settings['staff_password_hash'] ?? '');
-        if ($station_staff_hash !== '' && hash_equals($station_staff_username, $username) && password_verify($password, $station_staff_hash)) {
+        $username_key = $role . '_username';
+        $hash_key = $role . '_password_hash';
+        $station_username = (string) ($settings[$username_key] ?? '');
+        $station_hash = (string) ($settings[$hash_key] ?? '');
+        if ($station_hash !== '' && hash_equals($station_username, $username) && password_verify($password, $station_hash)) {
             return $code;
         }
     }
 
     return null;
+}
+
+function find_staff_login_station(string $username, string $password): ?string
+{
+    return find_station_role_login($username, $password, 'staff');
+}
+
+function find_supervisor_login_station(string $username, string $password): ?string
+{
+    return find_station_role_login($username, $password, 'supervisor');
+}
+
+function current_staff_role(): string
+{
+    return (string) ($_SESSION['cabin_staff_role'] ?? 'staff');
+}
+
+function current_staff_label(): string
+{
+    $role = current_staff_role();
+    return ucfirst($role) . ' (' . af_get_current_station() . ')';
+}
+
+function af_note_entry(string $note, string $name, string $action): string
+{
+    $note = trim($note);
+    $name = trim($name);
+    $text = $note !== '' ? $note : $action;
+    return date('Y-m-d H:i') . ' - ' . ($name !== '' ? $name : current_staff_label()) . ' - ' . $text;
+}
+
+function af_note_parts(string $line): ?array
+{
+    if (preg_match('/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) - (.*?) - (.*)$/', trim($line), $matches)) {
+        return ['date' => $matches[1], 'name' => trim($matches[2]), 'text' => trim($matches[3])];
+    }
+    return null;
+}
+
+function af_append_note(string $existing, string $entry): string
+{
+    $existing = trim($existing);
+    $entry = trim($entry);
+    if ($entry === '') {
+        return $existing;
+    }
+    return trim($existing . ($existing !== '' ? "\n" : '') . $entry);
+}
+
+function af_notes_for_display(string $notes): string
+{
+    $lines = preg_split('/\R/', $notes);
+    $display = [];
+    foreach ($lines as $line) {
+        $line = trim((string) $line);
+        if ($line === '') {
+            continue;
+        }
+        $parts = af_note_parts($line);
+        if ($parts !== null) {
+            $display[] = $parts['date'] . ' - ' . $parts['text'] . ' updated by ' . $parts['name'];
+        } else {
+            $display[] = $line;
+        }
+    }
+
+    return implode("\n", $display);
+}
+
+function af_latest_note_staff_name(string $notes): string
+{
+    $lines = array_reverse(preg_split('/\R/', $notes));
+    foreach ($lines as $line) {
+        $parts = af_note_parts((string) $line);
+        if ($parts !== null) {
+            return $parts['name'];
+        }
+    }
+    return '';
+}
+
+function af_latest_note_text(string $notes): string
+{
+    $lines = array_reverse(preg_split('/\R/', $notes));
+    foreach ($lines as $line) {
+        $line = trim((string) $line);
+        if ($line === '') {
+            continue;
+        }
+        $parts = af_note_parts($line);
+        if ($parts !== null) {
+            return $parts['text'];
+        }
+        if (!preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2} - .*? - [^:]+$/', $line)) {
+            return $line;
+        }
+    }
+    return '';
+}
+
+function af_first_note_staff_name(string $notes): string
+{
+    foreach (preg_split('/\R/', $notes) as $line) {
+        $parts = af_note_parts((string) $line);
+        if ($parts !== null) {
+            return $parts['name'];
+        }
+    }
+    return '';
+}
+
+function af_pickup_note_staff_name(string $notes): string
+{
+    foreach (preg_split('/\R/', $notes) as $line) {
+        $parts = af_note_parts((string) $line);
+        if ($parts !== null && stripos($parts['text'], 'Picked up') === 0) {
+            return $parts['name'];
+        }
+    }
+    return '';
+}
+
+function af_rewrite_first_note_staff_name(string $notes, string $name): string
+{
+    $name = trim($name);
+    if ($name === '') {
+        return $notes;
+    }
+    $lines = preg_split('/\R/', $notes);
+    foreach ($lines as $index => $line) {
+        $parts = af_note_parts((string) $line);
+        if ($parts !== null) {
+            $lines[$index] = $parts['date'] . ' - ' . $name . ' - ' . $parts['text'];
+            break;
+        }
+    }
+    return trim(implode("\n", $lines));
+}
+
+function af_rewrite_pickup_note_staff_name(string $notes, string $name): string
+{
+    $name = trim($name);
+    if ($name === '') {
+        return $notes;
+    }
+    $lines = preg_split('/\R/', $notes);
+    foreach ($lines as $index => $line) {
+        $parts = af_note_parts((string) $line);
+        if ($parts !== null && stripos($parts['text'], 'Picked up') === 0) {
+            $lines[$index] = $parts['date'] . ' - ' . $name . ' - ' . $parts['text'];
+            break;
+        }
+    }
+    return trim(implode("\n", $lines));
+}
+
+function af_staff_activity_recipients(array $settings): array
+{
+    $emails = [
+        $settings['admin_notification_email'] ?? '',
+        $settings['staff_notification_email'] ?? ''
+    ];
+    return array_values(array_unique(array_filter(array_map('trim', $emails), fn($email) => filter_var($email, FILTER_VALIDATE_EMAIL))));
+}
+
+function af_notify_staff_activity(PDO $pdo, array $settings, string $event, array $details): void
+{
+    $setting_key = [
+        'add' => 'notify_admin_supervisor_on_add',
+        'delete' => 'notify_admin_supervisor_on_delete',
+        'status' => 'notify_admin_supervisor_on_status'
+    ][$event] ?? '';
+    if ($setting_key === '' || (string) ($settings[$setting_key] ?? '1') !== '1') {
+        return;
+    }
+    $recipients = af_staff_activity_recipients($settings);
+    if (!$recipients) {
+        return;
+    }
+    $station_code = af_get_current_station();
+    $stations = af_stations();
+    $details['station'] = trim($station_code . ' - ' . ($stations[$station_code] ?? $station_code));
+    $email = af_staff_item_activity_email($settings, $details);
+    foreach ($recipients as $recipient) {
+        $mail = af_send_configured_email($recipient, $email['subject'], $email['html'], $settings);
+        if (!$mail['sent']) {
+            error_log("AeroFind staff activity mail warning: " . $mail['error']);
+        }
+    }
 }
 
 function save_stations(array $stations): bool
@@ -394,7 +479,7 @@ function station_pdo_for_admin(string $station): PDO
     if ($is_new_db && file_exists(__DIR__ . '/cabin_db.sqlite')) {
         $master = new PDO('sqlite:' . __DIR__ . '/cabin_db.sqlite');
         $master->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        foreach (['settings', 'airlines'] as $table) {
+        foreach (['settings'] as $table) {
             $rows = $master->query("SELECT * FROM $table")->fetchAll(PDO::FETCH_ASSOC);
             foreach ($rows as $row) {
                 $columns = array_keys($row);
@@ -418,16 +503,54 @@ unset($_SESSION['success_msg']);
 $login_error = $_SESSION['login_error'] ?? null;
 unset($_SESSION['login_error']);
 
+$needs_initial_setup = $admin_password_hash === '' && $staff_password_hash === '';
+
+if ($needs_initial_setup && isset($_POST['setup_admin_username'], $_POST['setup_admin_password'])) {
+    if (!af_rate_limit('initial_setup', 5, 900)) {
+        $_SESSION['login_error'] = "Too many setup attempts. Please wait 15 minutes and try again.";
+        header("Location: staff.php");
+        exit;
+    }
+
+    $setup_username = trim((string) $_POST['setup_admin_username']);
+    $setup_password = (string) $_POST['setup_admin_password'];
+    $setup_confirm = (string) ($_POST['setup_admin_password_confirm'] ?? '');
+
+    if ($setup_username === '') {
+        $_SESSION['login_error'] = "Admin username is required.";
+    } elseif (strlen($setup_password) < 12) {
+        $_SESSION['login_error'] = "Admin password must be at least 12 characters.";
+    } elseif (!hash_equals($setup_password, $setup_confirm)) {
+        $_SESSION['login_error'] = "Admin password confirmation does not match.";
+    } else {
+        af_setting($pdo, 'admin_username', $setup_username);
+        af_setting($pdo, 'admin_password_hash', password_hash($setup_password, PASSWORD_DEFAULT));
+        af_setting($pdo, 'staff_username', $setup_username);
+        af_setting($pdo, 'staff_password_hash', password_hash($setup_password, PASSWORD_DEFAULT));
+        session_regenerate_id(true);
+        $_SESSION['cabin_staff_loggedin'] = true;
+        $_SESSION['cabin_staff_role'] = 'admin';
+        $_SESSION['active_station'] = af_get_current_station();
+        header("Location: staff.php");
+        exit;
+    }
+
+    header("Location: staff.php");
+    exit;
+}
+
 if (isset($_POST['login_username']) && isset($_POST['login_password'])) {
     $login_username = (string) $_POST['login_username'];
     $login_password = (string) $_POST['login_password'];
+
+    if (!af_rate_limit('staff_login_' . $login_username, 8, 900)) {
+        $_SESSION['login_error'] = "Too many login attempts. Please wait 15 minutes and try again.";
+        header("Location: staff.php");
+        exit;
+    }
     $admin_password_ok = $admin_password_hash !== ''
         ? password_verify($login_password, $admin_password_hash)
-        : hash_equals('password', $login_password);
-    $staff_password_ok = $staff_password_hash !== ''
-        ? password_verify($login_password, $staff_password_hash)
-        : hash_equals('password', (string) $_POST['login_password']);
-
+        : false;
     if (hash_equals($admin_username, $login_username) && $admin_password_ok) {
         session_regenerate_id(true);
         $_SESSION['cabin_staff_loggedin'] = true;
@@ -444,7 +567,20 @@ if (isset($_POST['login_username']) && isset($_POST['login_password'])) {
         $_SESSION['cabin_staff_role'] = 'staff';
         $_SESSION['active_station'] = $staff_station;
         if (!headers_sent()) {
-            setcookie('af_station', $staff_station, time() + (86400 * 30), "/", "", false, true);
+            af_set_cookie('af_station', $staff_station, time() + (86400 * 30));
+        }
+        header("Location: staff.php");
+        exit;
+    }
+
+    $supervisor_station = find_supervisor_login_station($login_username, $login_password);
+    if ($supervisor_station !== null) {
+        session_regenerate_id(true);
+        $_SESSION['cabin_staff_loggedin'] = true;
+        $_SESSION['cabin_staff_role'] = 'supervisor';
+        $_SESSION['active_station'] = $supervisor_station;
+        if (!headers_sent()) {
+            af_set_cookie('af_station', $supervisor_station, time() + (86400 * 30));
         }
         header("Location: staff.php");
         exit;
@@ -463,6 +599,10 @@ if (isset($_GET['logout'])) {
 
 if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'] === true) {
     $is_admin = (($_SESSION['cabin_staff_role'] ?? 'staff') === 'admin');
+    $is_supervisor = (($_SESSION['cabin_staff_role'] ?? 'staff') === 'supervisor');
+    $can_edit_items = true;
+    $can_change_item_photos = $is_admin || $is_supervisor;
+    $can_delete_items = $is_admin || $is_supervisor;
 
     // ── AJAX: purge preview (count only, no delete) ─────────────────────────
     if (isset($_GET['purge_preview']) && $is_admin) {
@@ -513,18 +653,24 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
     $company_logo = af_valid_url_or_path($db_settings['company_logo'] ?? '');
     $favicon_url = af_valid_url_or_path($db_settings['favicon_url'] ?? '');
     $staff_username = $db_settings['staff_username'] ?? 'admin';
+    $supervisor_username = $db_settings['supervisor_username'] ?? '';
     $admin_username = $db_settings['admin_username'] ?? 'admin';
     $staff_login_email = $db_settings['staff_login_email'] ?? 'staff@aerofind.online';
     $developer_contact_email = filter_var($db_settings['developer_contact_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $db_settings['developer_contact_email'] : '';
     $passenger_view_days = $db_settings['passenger_view_days'] ?? 30;
+    $database_backup_interval_days = (int) ($db_settings['database_backup_interval_days'] ?? 7);
     $items_per_page = (int) ($db_settings['items_per_page'] ?? 20);
     if ($items_per_page < 1) {
         $items_per_page = 20;
     }
     $passenger_card_layout_value = $db_settings['passenger_card_layout'] ?? 'dual';
     $passenger_card_layout = in_array($passenger_card_layout_value, ['single', 'dual'], true) ? $passenger_card_layout_value : 'dual';
-    $pickup_info = $db_settings['pickup_info'] ?? 'Main Terminal, Cabin Recovery Lost & Found Desk. Please bring a valid ID and the reference code.';
+    $pickup_info = af_pickup_info($db_settings, af_get_current_station(), af_stations()[af_get_current_station()] ?? af_get_current_station());
     $staff_notification_email = $db_settings['staff_notification_email'] ?? 'staff@aerofind.online';
+    $admin_notification_email = $db_settings['admin_notification_email'] ?? '';
+    $notify_admin_supervisor_on_add = (string) ($db_settings['notify_admin_supervisor_on_add'] ?? '1') === '1';
+    $notify_admin_supervisor_on_delete = (string) ($db_settings['notify_admin_supervisor_on_delete'] ?? '1') === '1';
+    $notify_admin_supervisor_on_status = (string) ($db_settings['notify_admin_supervisor_on_status'] ?? '1') === '1';
     $smtp_host = $db_settings['smtp_host'] ?? '';
     $email_delivery_method_value = $db_settings['email_delivery_method'] ?? 'php_mail';
     $email_delivery_method = in_array($email_delivery_method_value, ['php_mail', 'smtp'], true) ? $email_delivery_method_value : 'php_mail';
@@ -558,24 +704,62 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
             $photo_name = basename(af_store_uploaded_image('photo', $tag));
 
             $created_at = !empty($_POST['created_at']) ? $_POST['created_at'] . ' ' . date('H:i:s') : date('Y-m-d H:i:s');
+            $other_info = normalize_saved_flight_info($pdo, $_POST['other_info'] ?? '');
+            $pax_email = trim((string) ($_POST['pax_email'] ?? ''));
+            $pax_name = trim((string) ($_POST['pax_name'] ?? ''));
+            $item_description = trim((string) ($_POST['item_description'] ?? ''));
+            $staff_member_name = trim((string) ($_POST['staff_member_name'] ?? ''));
+            if ($staff_member_name === '') {
+                $login_error = "Staff name is required when adding an item.";
+            }
 
-            $stmt = $pdo->prepare("INSERT INTO items (tag_no, item_description, contents, pax_name, pax_contact_no, pax_email, status, other_info, comments, user_comments, delivery_info, photo, created_at) VALUES (:tag, :desc, :contents, :name, :contact, :email, :status, :other, :comments, :user_comments, :delivery_info, :photo, :created_at)");
-            $stmt->execute([
-                ':tag' => $tag,
-                ':desc' => $_POST['item_description'],
-                ':contents' => $_POST['contents'] ?? '',
-                ':name' => $_POST['pax_name'] ?? '',
-                ':contact' => $_POST['pax_contact_no'] ?? '',
-                ':email' => $_POST['pax_email'] ?? '',
-                ':status' => $_POST['status'],
-                ':other' => $_POST['other_info'] ?? '',
-                ':comments' => $_POST['comments'] ?? '',
-                ':user_comments' => $_POST['user_comments'] ?? '',
-                ':delivery_info' => $_POST['delivery_info'] ?? '',
-                ':photo' => $photo_name,
-                ':created_at' => $created_at
-            ]);
-            $success_msg = "Item added successfully.";
+            if (!isset($login_error)) {
+                $add_note = af_note_entry($_POST['user_comments'] ?? '', $staff_member_name, 'Item added');
+                $stmt = $pdo->prepare("INSERT INTO items (tag_no, item_description, contents, pax_name, pax_contact_no, pax_email, status, other_info, comments, user_comments, delivery_info, photo, created_at) VALUES (:tag, :desc, :contents, :name, :contact, :email, :status, :other, :comments, :user_comments, :delivery_info, :photo, :created_at)");
+                $stmt->execute([
+                    ':tag' => $tag,
+                    ':desc' => $item_description,
+                    ':contents' => $_POST['contents'] ?? '',
+                    ':name' => $pax_name,
+                    ':contact' => $_POST['pax_contact_no'] ?? '',
+                    ':email' => $pax_email,
+                    ':status' => $_POST['status'],
+                    ':other' => $other_info,
+                    ':comments' => $_POST['comments'] ?? '',
+                    ':user_comments' => $add_note,
+                    ':delivery_info' => '',
+                    ':photo' => $photo_name,
+                    ':created_at' => $created_at
+                ]);
+                af_notify_staff_activity($pdo, $db_settings, 'add', [
+                    'action' => 'Item added',
+                    'tag' => $tag,
+                    'item_description' => $item_description,
+                    'actor' => $staff_member_name,
+                    'status' => $_POST['status'] ?? '',
+                    'note' => trim((string) ($_POST['user_comments'] ?? ''))
+                ]);
+                $item_mail = ['sent' => false, 'error' => ''];
+                if (filter_var($pax_email, FILTER_VALIDATE_EMAIL)) {
+                    $station_code = af_get_current_station();
+                    $stations = af_stations();
+                    $station_name = $stations[$station_code] ?? $station_code;
+                    $collection_location = af_pickup_info($db_settings, $station_code, $station_name);
+                    $email = af_staff_logged_found_item_email($db_settings, [
+                        'tag' => $tag,
+                        'pax_name' => $pax_name,
+                        'item_description' => $item_description,
+                        'flight_details' => af_mail_flight_display($pdo, $other_info),
+                        'station' => trim($station_code . ' - ' . $station_name),
+                        'collection_location' => $collection_location
+                    ]);
+                    $item_mail = af_send_configured_email($pax_email, $email['subject'], $email['html'], $db_settings);
+                    if (!$item_mail['sent']) {
+                        error_log("AeroFind add item passenger mail warning: " . $item_mail['error']);
+                    }
+                }
+                $success_msg = $item_mail['sent'] ? "Item added successfully and passenger email sent." : "Item added successfully.";
+            }
         }
         if ($_POST['action'] === 'approve_pending_report') {
             $report_id = (int) ($_POST['report_id'] ?? 0);
@@ -594,7 +778,7 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 if ((int) $exists_stmt->fetchColumn() > 0) {
                     $tag = next_item_tag($pdo);
                 }
-                $flight_info = trim(($report['airline'] ?? '') . ' ' . ($report['flight_number'] ?? ''));
+                $flight_info = normalize_saved_flight_info($pdo, trim(($report['airline'] ?? '') . ' ' . ($report['flight_number'] ?? '')));
                 $note = "Approved passenger lost report " . ($report['report_ref'] ?? '');
                 $stmt = $pdo->prepare("INSERT INTO items (tag_no, item_description, pax_name, pax_contact_no, pax_email, other_info, comments, user_comments, status, photo, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Lost', ?, datetime('now'))");
                 $stmt->execute([
@@ -613,23 +797,13 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
 
                 $mail = ['sent' => false, 'error' => ''];
                 if (!empty($report['pax_email'])) {
-                    $html = af_render_email($db_settings, [
-                        'title' => 'Lost report approved',
-                        'preheader' => "Your report has been added as $tag.",
-                        'eyebrow' => 'Report reviewed',
-                        'paragraphs' => [
-                            'Dear ' . ($report['pax_name'] ?: 'Passenger') . ',',
-                            'Your lost item report has been reviewed and added to our cabin recovery records.'
-                        ],
-                        'rows' => [
-                            ['label' => 'Item reference', 'value' => $tag, 'highlight' => true],
-                            ['label' => 'Report reference', 'value' => $report['report_ref']],
-                            ['label' => 'Item', 'value' => $report['item_description']]
-                        ],
-                        'note_title' => 'What happens next',
-                        'note' => 'Staff will contact you if a matching item is recovered.'
+                    $email = af_pending_report_approved_email($db_settings, [
+                        'tag' => $tag,
+                        'pax_name' => $report['pax_name'] ?? '',
+                        'report_ref' => $report['report_ref'] ?? '',
+                        'item_description' => $report['item_description'] ?? ''
                     ]);
-                    $mail = send_staff_configured_email($report['pax_email'], "$company_name - Lost Report Approved [$tag]", $html, $db_settings);
+                    $mail = af_send_configured_email($report['pax_email'], $email['subject'], $email['html'], $db_settings);
                 }
                 $success_msg = $mail['sent'] ? "Pending report approved and passenger email sent." : "Pending report approved. Passenger email was not sent.";
                 if (!$mail['sent'] && !empty($mail['error'])) {
@@ -640,6 +814,7 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
         if ($_POST['action'] === 'duplicate_pending_report') {
             $report_id = (int) ($_POST['report_id'] ?? 0);
             $existing_tag = normalize_tag($_POST['existing_tag_no'] ?? '');
+            $stored_existing_tag = find_existing_item_tag($pdo, $_POST['existing_tag_no'] ?? '');
             $staff_notes = trim($_POST['staff_notes'] ?? '');
             $stmt = $pdo->prepare("SELECT * FROM pending_reports WHERE id = ? AND status = 'Pending'");
             $stmt->execute([$report_id]);
@@ -648,40 +823,23 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 $login_error = "Pending report not found or already reviewed.";
             } elseif ($existing_tag === '') {
                 $login_error = "Error: Existing Tag ID is required.";
+            } elseif ($stored_existing_tag === '') {
+                $login_error = "Error: Existing Tag ID '$existing_tag' does not exist in lost reports inventory.";
             } else {
-                // Check if the tag actually exists in items table
-                $stmt_chk = $pdo->prepare("SELECT COUNT(*) FROM items WHERE tag_no = ?");
-                $stmt_chk->execute([$existing_tag]);
-                $exists = $stmt_chk->fetchColumn() > 0;
-                if (!$exists) {
-                    $login_error = "Error: Existing Tag ID '$existing_tag' does not exist in lost reports inventory.";
-                } else {
-                    $stmt = $pdo->prepare("UPDATE pending_reports SET status = 'Duplicate', matched_tag_no = ?, staff_notes = ?, reviewed_at = datetime('now') WHERE id = ?");
-                    $stmt->execute([$existing_tag, $staff_notes, $report_id]);
-                    $mail = ['sent' => false, 'error' => ''];
-                    if (!empty($report['pax_email'])) {
-                        $duplicate_rows = [];
-                        if ($existing_tag !== '') {
-                            $duplicate_rows[] = ['label' => 'Existing reference', 'value' => $existing_tag, 'highlight' => true];
-                        }
-                        $html = af_render_email($db_settings, [
-                            'title' => 'Lost report reviewed',
-                            'preheader' => 'Your report appears to match an existing recovery record.',
-                            'eyebrow' => 'Report reviewed',
-                            'paragraphs' => [
-                                'Dear ' . ($report['pax_name'] ?: 'Passenger') . ',',
-                                'Staff reviewed your report and found that this item appears to already be logged in our cabin recovery system.'
-                            ],
-                            'rows' => $duplicate_rows,
-                            'note_title' => 'Next step',
-                            'note' => 'Staff will continue using the existing record and contact you if there is an update.'
-                        ]);
-                        $mail = send_staff_configured_email($report['pax_email'], "$company_name - Lost Report Already Logged [$existing_tag]", $html, $db_settings);
-                    }
-                    $success_msg = $mail['sent'] ? "Pending report marked as already logged and passenger email sent." : "Pending report marked as already logged. Passenger email was not sent.";
-                    if (!$mail['sent'] && !empty($mail['error'])) {
-                        error_log("AeroFind duplicate report mail warning: " . $mail['error']);
-                    }
+                $existing_tag = $stored_existing_tag;
+                $stmt = $pdo->prepare("UPDATE pending_reports SET status = 'Duplicate', matched_tag_no = ?, staff_notes = ?, reviewed_at = datetime('now') WHERE id = ?");
+                $stmt->execute([$existing_tag, $staff_notes, $report_id]);
+                $mail = ['sent' => false, 'error' => ''];
+                if (!empty($report['pax_email'])) {
+                    $email = af_pending_report_duplicate_email($db_settings, [
+                        'pax_name' => $report['pax_name'] ?? '',
+                        'existing_tag' => $existing_tag
+                    ]);
+                    $mail = af_send_configured_email($report['pax_email'], $email['subject'], $email['html'], $db_settings);
+                }
+                $success_msg = $mail['sent'] ? "Pending report marked as already logged and passenger email sent." : "Pending report marked as already logged. Passenger email was not sent.";
+                if (!$mail['sent'] && !empty($mail['error'])) {
+                    error_log("AeroFind duplicate report mail warning: " . $mail['error']);
                 }
             }
         }
@@ -700,19 +858,13 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 $stmt->execute([$staff_notes, $report_id]);
                 $mail = ['sent' => false, 'error' => ''];
                 if (!empty($report['pax_email'])) {
-                    $html = af_render_email($db_settings, [
-                        'title' => 'Lost report reviewed',
-                        'preheader' => 'Your lost item report was reviewed by staff.',
-                        'eyebrow' => 'Report reviewed',
-                        'paragraphs' => [
-                            'Dear ' . ($report['pax_name'] ?: 'Passenger') . ',',
-                            'Staff reviewed your lost item report and did not add a new cabin recovery record at this time.'
-                        ],
-                        'note_title' => $staff_notes !== '' ? 'Staff note' : '',
-                        'note' => $staff_notes
-                    ]);
                     $report_ref = $report['report_ref'] ?: ('Report ' . $report_id);
-                    $mail = send_staff_configured_email($report['pax_email'], "$company_name - Lost Report Not Added [$report_ref]", $html, $db_settings);
+                    $email = af_pending_report_rejected_email($db_settings, [
+                        'pax_name' => $report['pax_name'] ?? '',
+                        'report_ref' => $report_ref,
+                        'staff_notes' => $staff_notes
+                    ]);
+                    $mail = af_send_configured_email($report['pax_email'], $email['subject'], $email['html'], $db_settings);
                 }
                 $success_msg = $mail['sent'] ? "Pending report rejected and passenger email sent." : "Pending report rejected. Passenger email was not sent.";
                 if (!$mail['sent'] && !empty($mail['error'])) {
@@ -729,25 +881,48 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
         }
         if ($_POST['action'] === 'update_item') {
             $tag = normalize_tag($_POST['tag_no'] ?? '');
-            $stored_photo = af_store_uploaded_image('photo', $tag);
+            $stored_photo = $can_change_item_photos ? af_store_uploaded_image('photo', $tag) : '';
             $photo_name = $stored_photo !== '' ? basename($stored_photo) : null;
             $requested_status = $_POST['status'] ?? 'Found';
-            $user_comments = $_POST['user_comments'] ?? '';
-            $delivery_info = $_POST['delivery_info'] ?? '';
+            $main_internal_author = trim((string) ($_POST['internal_note_author'] ?? ''));
+            $main_handover_author = trim((string) ($_POST['handover_note_author'] ?? ''));
+            $internal_update_author = trim((string) ($_POST['internal_update_author'] ?? ''));
+            $handover_update_author = trim((string) ($_POST['handover_update_author'] ?? ''));
+            $submitted_internal_note = trim((string) ($_POST['user_comments'] ?? ''));
+            $submitted_handover_note = trim((string) ($_POST['delivery_info'] ?? ''));
             $comments = $_POST['comments'] ?? '';
-            $pax_name = $_POST['pax_name'] ?? '';
 
-            $existing_stmt = $pdo->prepare("SELECT status, pax_name, pax_email, item_description FROM items WHERE tag_no = ?");
+            $existing_stmt = $pdo->prepare("SELECT status, pax_name, pax_email, item_description, other_info, user_comments, delivery_info FROM items WHERE tag_no = ?");
             $existing_stmt->execute([$tag]);
             $existing_item = $existing_stmt->fetch(PDO::FETCH_ASSOC) ?: [];
             $existing_status = $existing_item['status'] ?? '';
+            $pax_name = $_POST['pax_name'] ?? '';
+            $existing_user_comments = trim((string) ($existing_item['user_comments'] ?? ''));
+            $existing_delivery_info = trim((string) ($existing_item['delivery_info'] ?? ''));
+            $user_comments = $existing_user_comments;
+            $delivery_info = $existing_delivery_info;
+            if ($is_admin || $is_supervisor) {
+                $user_comments = af_rewrite_first_note_staff_name($user_comments, $main_internal_author);
+                $delivery_info = af_rewrite_pickup_note_staff_name($delivery_info, $main_handover_author);
+            }
             $restore_from_claim = ($requested_status === 'Found' && $existing_status === 'Claimed');
             $send_lost_email = ($requested_status === 'Lost' && $existing_status !== 'Lost' && !empty($existing_item['pax_email']));
+            $send_found_email = ($requested_status === 'Found' && $existing_status === 'Lost' && !empty($existing_item['pax_email']));
             if ($restore_from_claim) {
                 $user_comments = remove_claim_request_notes($user_comments);
                 $delivery_info = remove_claim_request_notes($delivery_info);
                 $comments = '';
                 $pax_name = '';
+            }
+            if ($submitted_internal_note !== '') {
+                $user_comments = af_append_note($user_comments, af_note_entry($submitted_internal_note, $internal_update_author, 'Internal note'));
+            }
+            if ($submitted_handover_note !== '') {
+                $delivery_info = af_append_note($delivery_info, af_note_entry($submitted_handover_note, $handover_update_author, 'Handover note'));
+            }
+            if (in_array($requested_status, ['Lost', 'Disposed'], true) && $requested_status !== $existing_status) {
+                $status_author = $internal_update_author !== '' ? $internal_update_author : $main_internal_author;
+                $user_comments = af_append_note($user_comments, af_note_entry('Status changed to ' . $requested_status, $status_author, 'Status update'));
             }
 
             if ($photo_name !== null) {
@@ -797,37 +972,71 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 $stmt = $pdo->prepare("UPDATE items SET pax_email = '', pax_contact_no = '' WHERE tag_no = ?");
                 $stmt->execute([$tag]);
             }
-            if ($send_lost_email) {
-                $lost_subject = "$company_name - Lost Item Status Update for [$tag]";
-                $lost_html = af_render_email($db_settings, [
-                    'title' => 'Lost item status update',
-                    'preheader' => "Status update for item $tag.",
-                    'eyebrow' => 'Status update',
-                    'paragraphs' => [
-                        'Dear ' . ($existing_item['pax_name'] ?: $pax_name ?: 'Passenger') . ',',
-                        'We are sorry to inform you that your item has been marked as lost in our cabin recovery system because it has not been recovered.'
-                    ],
-                    'rows' => [
-                        ['label' => 'Reference', 'value' => $tag, 'highlight' => true],
-                        ['label' => 'Item', 'value' => $existing_item['item_description'] ?: ($_POST['item_description'] ?? '')]
-                    ],
-                    'note_title' => 'Record status',
-                    'note' => 'If the item is later recovered, our team can update the record and contact you again.'
+            if ($requested_status !== $existing_status) {
+                af_notify_staff_activity($pdo, $db_settings, 'status', [
+                    'action' => 'Item status changed',
+                    'tag' => $tag,
+                    'item_description' => $existing_item['item_description'] ?: ($_POST['item_description'] ?? ''),
+                    'actor' => ($internal_update_author !== '' ? $internal_update_author : ($main_internal_author !== '' ? $main_internal_author : current_staff_label())),
+                    'status' => $requested_status,
+                    'previous_status' => $existing_status,
+                    'note' => $submitted_internal_note !== '' ? $submitted_internal_note : $submitted_handover_note
                 ]);
-                $lost_mail = send_staff_configured_email($existing_item['pax_email'], $lost_subject, $lost_html, $db_settings);
+            }
+            if ($send_lost_email) {
+                $email = af_lost_status_email($db_settings, [
+                    'tag' => $tag,
+                    'pax_name' => $existing_item['pax_name'] ?: $pax_name,
+                    'item_description' => $existing_item['item_description'] ?: ($_POST['item_description'] ?? '')
+                ]);
+                $lost_mail = af_send_configured_email($existing_item['pax_email'], $email['subject'], $email['html'], $db_settings);
                 if (!$lost_mail['sent']) {
                     error_log("AeroFind lost status mail warning: " . $lost_mail['error']);
                 }
                 $success_msg = $lost_mail['sent'] ? "Item details updated and passenger lost email sent." : "Item details updated. Passenger lost email was not sent.";
+            } elseif ($send_found_email) {
+                $station_code = af_get_current_station();
+                $stations = af_stations();
+                $station_name = $stations[$station_code] ?? $station_code;
+                $collection_location = af_pickup_info($db_settings, $station_code, $station_name);
+
+                $email = af_found_status_email($db_settings, [
+                    'tag' => $tag,
+                    'pax_name' => $existing_item['pax_name'] ?: $pax_name,
+                    'item_description' => $existing_item['item_description'] ?: ($_POST['item_description'] ?? ''),
+                    'flight_details' => af_mail_flight_display($pdo, $existing_item['other_info'] ?: ($_POST['other_info'] ?? '')),
+                    'station' => trim($station_code . ' - ' . $station_name),
+                    'collection_location' => $collection_location
+                ]);
+                $found_mail = af_send_configured_email($existing_item['pax_email'], $email['subject'], $email['html'], $db_settings);
+                if (!$found_mail['sent']) {
+                    error_log("AeroFind found status mail warning: " . $found_mail['error']);
+                }
+                $success_msg = $found_mail['sent'] ? "Item details updated and passenger found email sent." : "Item details updated. Passenger found email was not sent.";
             } else {
                 $success_msg = "Item details updated successfully.";
             }
         }
         if ($_POST['action'] === 'delete_item') {
+            if (!$can_delete_items) {
+                $_SESSION['login_error'] = "Only supervisors and admins can delete items.";
+                header("Location: staff.php");
+                exit;
+            }
             $tag = normalize_tag($_POST['tag_no'] ?? '');
             if ($tag) {
+                $item_stmt = $pdo->prepare("SELECT item_description, status FROM items WHERE tag_no = ?");
+                $item_stmt->execute([$tag]);
+                $item_for_delete = $item_stmt->fetch(PDO::FETCH_ASSOC) ?: [];
                 $stmtDel = $pdo->prepare("INSERT OR IGNORE INTO deleted_items (tag_no) VALUES (?)");
                 $stmtDel->execute([$tag]);
+                af_notify_staff_activity($pdo, $db_settings, 'delete', [
+                    'action' => 'Item deleted',
+                    'tag' => $tag,
+                    'item_description' => $item_for_delete['item_description'] ?? '',
+                    'actor' => current_staff_label(),
+                    'status' => $item_for_delete['status'] ?? ''
+                ]);
             }
             $stmt = $pdo->prepare("DELETE FROM items WHERE tag_no = ?");
             $stmt->execute([$tag]);
@@ -835,15 +1044,21 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
         }
         if ($_POST['action'] === 'pickup_item') {
             $tag = normalize_tag($_POST['tag_no'] ?? '');
+            $pickup_staff_name = trim((string) ($_POST['pickup_staff_name'] ?? ''));
+            if ($pickup_staff_name === '') {
+                $login_error = "Staff name is required when marking an item picked up.";
+            }
             $stmt = $pdo->prepare("SELECT item_description, other_info, pax_name, pax_email, pax_contact_no, user_comments, delivery_info FROM items WHERE tag_no = ?");
             $stmt->execute([$tag]);
             $item_for_pickup = $stmt->fetch(PDO::FETCH_ASSOC);
 
-            if ($item_for_pickup) {
+            if ($item_for_pickup && !isset($login_error)) {
                 $pickup_stamp = date('Y-m-d H:i');
-                $pickup_note = "Picked up on $pickup_stamp";
+                $pickup_note = "Picked up";
                 if (!empty($item_for_pickup['pax_name'])) {
                     $pickup_note .= " by " . $item_for_pickup['pax_name'];
+                } else {
+                    $pickup_note .= " by passenger/claimant";
                 }
                 $contact_parts = array_filter([
                     $item_for_pickup['pax_email'] ?? '',
@@ -854,32 +1069,29 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 }
 
                 $existing_handover = trim($item_for_pickup['delivery_info'] ?? '');
-                $updated_handover = trim($existing_handover . ($existing_handover !== '' ? "\n" : '') . $pickup_note);
+                $updated_handover = af_append_note($existing_handover, af_note_entry($pickup_note, $pickup_staff_name, 'Pickup'));
 
                 $stmt = $pdo->prepare("UPDATE items SET status = 'Delivered', delivery_info = ? WHERE tag_no = ?");
                 $stmt->execute([$updated_handover, $tag]);
+                af_notify_staff_activity($pdo, $db_settings, 'status', [
+                    'action' => 'Item picked up',
+                    'tag' => $tag,
+                    'item_description' => $item_for_pickup['item_description'] ?? '',
+                    'actor' => $pickup_staff_name,
+                    'status' => 'Delivered',
+                    'note' => $pickup_note
+                ]);
 
                 $pickup_email_sent = false;
                 if (!empty($item_for_pickup['pax_email'])) {
-                    $pickup_subject = "AeroFind Cabin Recovery - Pickup Completed for [$tag]";
-                    $pickup_html = af_render_email($db_settings, [
-                        'title' => 'Pickup completed',
-                        'preheader' => "Pickup completed for item $tag.",
-                        'eyebrow' => 'Handover complete',
-                        'paragraphs' => [
-                            'Dear ' . ($item_for_pickup['pax_name'] ?: 'Passenger') . ',',
-                            'This confirms that your item pickup has been completed by AeroFind Cabin Recovery.'
-                        ],
-                        'rows' => [
-                            ['label' => 'Reference', 'value' => $tag, 'highlight' => true],
-                            ['label' => 'Item', 'value' => $item_for_pickup['item_description'] ?? ''],
-                            ['label' => 'Flight/details', 'value' => $item_for_pickup['other_info'] ?? ''],
-                            ['label' => 'Completed', 'value' => $pickup_stamp]
-                        ],
-                        'note_title' => 'Thank you',
-                        'note' => 'Thank you for using AeroFind Cabin Recovery.'
+                    $email = af_pickup_completed_email($db_settings, [
+                        'tag' => $tag,
+                        'pax_name' => $item_for_pickup['pax_name'] ?? '',
+                        'item_description' => $item_for_pickup['item_description'] ?? '',
+                        'flight_details' => af_mail_flight_display($pdo, $item_for_pickup['other_info'] ?? ''),
+                        'completed_at' => $pickup_stamp
                     ]);
-                    $pickup_mail = send_staff_configured_email($item_for_pickup['pax_email'], $pickup_subject, $pickup_html, $db_settings);
+                    $pickup_mail = af_send_configured_email($item_for_pickup['pax_email'], $email['subject'], $email['html'], $db_settings);
                     $pickup_email_sent = $pickup_mail['sent'];
                     if (!$pickup_email_sent) {
                         error_log("AeroFind pickup mail warning: " . $pickup_mail['error']);
@@ -887,7 +1099,7 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 }
 
                 $success_msg = $pickup_email_sent ? "Item marked as picked up and passenger email sent." : "Item marked as picked up. Passenger pickup email was not sent.";
-            } else {
+            } elseif (!$item_for_pickup) {
                 $login_error = "Item not found.";
             }
         }
@@ -938,8 +1150,9 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 header("Location: staff.php");
                 exit;
             }
-            if (file_exists(__DIR__ . '/cabin_db_backup.sqlite')) {
-                copy(__DIR__ . '/cabin_db_backup.sqlite', $db_file);
+            $backup_file = af_station_backup_file(af_get_current_station());
+            if (file_exists($backup_file)) {
+                copy($backup_file, $db_file);
                 $success_msg = "Database restored from backup.";
             } else {
                 $login_error = "No backup file found.";
@@ -1032,15 +1245,39 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
 
             $station_code = strtoupper(trim((string) ($_POST['station_code'] ?? '')));
             $station_name = trim((string) ($_POST['station_name'] ?? ''));
+            $station_pickup_info = trim((string) ($_POST['station_pickup_info'] ?? ''));
+            $station_notification_email = trim((string) ($_POST['station_notification_email'] ?? ''));
+            $station_staff_username = trim((string) ($_POST['station_staff_username'] ?? ''));
+            $station_staff_password = (string) ($_POST['station_staff_password'] ?? '');
+            $station_supervisor_username = trim((string) ($_POST['station_supervisor_username'] ?? ''));
+            $station_supervisor_password = (string) ($_POST['station_supervisor_password'] ?? '');
             if (!preg_match('/^[A-Z0-9]{3,4}$/', $station_code)) {
                 $login_error = "Station code must be 3 or 4 letters/numbers.";
             } elseif ($station_name === '') {
                 $login_error = "Station name is required.";
+            } elseif ($station_pickup_info === '') {
+                $login_error = "Station pick-up location is required.";
+            } elseif (!filter_var($station_notification_email, FILTER_VALIDATE_EMAIL)) {
+                $login_error = "Station staff notification email is required.";
+            } elseif ($station_staff_username === '') {
+                $login_error = "Station staff username is required.";
+            } elseif (strlen($station_staff_password) < 4) {
+                $login_error = "Station staff password must be at least 4 characters.";
+            } elseif ($station_supervisor_username === '') {
+                $login_error = "Station supervisor username is required.";
+            } elseif (strlen($station_supervisor_password) < 4) {
+                $login_error = "Station supervisor password must be at least 4 characters.";
             } else {
                 $stations = af_stations();
                 $stations[$station_code] = $station_name;
                 if (save_stations($stations)) {
-                    station_pdo_for_admin($station_code);
+                    $target_pdo = station_pdo_for_admin($station_code);
+                    af_setting($target_pdo, 'pickup_info', $station_pickup_info);
+                    af_setting($target_pdo, 'staff_notification_email', $station_notification_email);
+                    af_setting($target_pdo, 'staff_username', $station_staff_username);
+                    af_setting($target_pdo, 'staff_password_hash', password_hash($station_staff_password, PASSWORD_DEFAULT));
+                    af_setting($target_pdo, 'supervisor_username', $station_supervisor_username);
+                    af_setting($target_pdo, 'supervisor_password_hash', password_hash($station_supervisor_password, PASSWORD_DEFAULT));
                     $_SESSION['success_msg'] = "Station $station_code added.";
                     header("Location: staff.php?station=" . rawurlencode($station_code));
                     exit;
@@ -1088,33 +1325,41 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 $target_pdo = station_pdo_for_admin($station_code);
                 $target_settings = af_settings($target_pdo);
                 $station_name = trim((string) ($_POST['station_name'] ?? ''));
+                $target_pickup_info = trim((string) ($_POST['station_pickup_info'] ?? ''));
+                $target_notification_email = trim((string) ($_POST['station_notification_email'] ?? ''));
                 $target_staff_username = trim((string) ($_POST['station_staff_username'] ?? ''));
-                $target_admin_username = trim((string) ($_POST['station_admin_username'] ?? ''));
+                $target_supervisor_username = trim((string) ($_POST['station_supervisor_username'] ?? ''));
 
                 if ($station_name === '') {
                     $login_error = "Station name is required.";
-                } elseif ($target_staff_username === '' || $target_admin_username === '') {
-                    $login_error = "Station staff and admin usernames are required.";
+                } elseif ($target_pickup_info === '') {
+                    $login_error = "Station pick-up location is required.";
+                } elseif (!filter_var($target_notification_email, FILTER_VALIDATE_EMAIL)) {
+                    $login_error = "Station staff notification email is required.";
+                } elseif ($target_staff_username === '' || $target_supervisor_username === '') {
+                    $login_error = "Station staff and supervisor usernames are required.";
                 } elseif (!empty($_POST['station_staff_password']) && strlen((string) $_POST['station_staff_password']) < 4) {
                     $login_error = "Station staff password must be at least 4 characters.";
-                } elseif (!empty($_POST['station_admin_password']) && strlen((string) $_POST['station_admin_password']) < 4) {
-                    $login_error = "Station admin password must be at least 4 characters.";
+                } elseif (!empty($_POST['station_supervisor_password']) && strlen((string) $_POST['station_supervisor_password']) < 4) {
+                    $login_error = "Station supervisor password must be at least 4 characters.";
                 } else {
                     $stations[$station_code] = $station_name;
                     save_stations($stations);
                     af_setting($target_pdo, 'staff_username', $target_staff_username);
-                    af_setting($target_pdo, 'admin_username', $target_admin_username);
+                    af_setting($target_pdo, 'supervisor_username', $target_supervisor_username);
+                    af_setting($target_pdo, 'pickup_info', $target_pickup_info);
+                    af_setting($target_pdo, 'staff_notification_email', $target_notification_email);
                     if (!empty($_POST['station_staff_password'])) {
                         af_setting($target_pdo, 'staff_password_hash', password_hash((string) $_POST['station_staff_password'], PASSWORD_DEFAULT));
                     } elseif (!array_key_exists('staff_password_hash', $target_settings)) {
                         af_setting($target_pdo, 'staff_password_hash', '');
                     }
-                    if (!empty($_POST['station_admin_password'])) {
-                        af_setting($target_pdo, 'admin_password_hash', password_hash((string) $_POST['station_admin_password'], PASSWORD_DEFAULT));
-                    } elseif (!array_key_exists('admin_password_hash', $target_settings)) {
-                        af_setting($target_pdo, 'admin_password_hash', '');
+                    if (!empty($_POST['station_supervisor_password'])) {
+                        af_setting($target_pdo, 'supervisor_password_hash', password_hash((string) $_POST['station_supervisor_password'], PASSWORD_DEFAULT));
+                    } elseif (!array_key_exists('supervisor_password_hash', $target_settings)) {
+                        af_setting($target_pdo, 'supervisor_password_hash', '');
                     }
-                    $_SESSION['success_msg'] = "Credentials updated for $station_code.";
+                    $_SESSION['success_msg'] = "Station settings updated for $station_code.";
                     header("Location: staff.php?station=" . rawurlencode(af_get_current_station()));
                     exit;
                 }
@@ -1154,8 +1399,8 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
             }
             $admin_password_hash = $db_settings['admin_password_hash'] ?? '';
             if (!empty($_POST['admin_password'])) {
-                if (strlen((string) $_POST['admin_password']) < 4) {
-                    $login_error = "Admin password must be at least 4 characters.";
+                if (strlen((string) $_POST['admin_password']) < 12) {
+                    $login_error = "Admin password must be at least 12 characters.";
                 } else {
                     $admin_password_hash = password_hash((string) $_POST['admin_password'], PASSWORD_DEFAULT);
                 }
@@ -1176,15 +1421,20 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
                 'favicon_url' => $favicon_url,
                 'admin_username' => trim($_POST['admin_username'] ?? 'admin'),
                 'admin_password_hash' => $admin_password_hash,
-                'staff_username' => trim($_POST['staff_username'] ?? 'admin'),
-                'staff_login_email' => filter_var($_POST['staff_login_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $_POST['staff_login_email'] : '',
+                'staff_username' => $db_settings['staff_username'] ?? 'admin',
+                'staff_login_email' => $db_settings['staff_login_email'] ?? '',
                 'developer_contact_email' => filter_var($_POST['developer_contact_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $_POST['developer_contact_email'] : '',
                 'staff_password_hash' => $staff_password_hash,
                 'passenger_view_days' => $_POST['passenger_view_days'] ?? 30,
+                'database_backup_interval_days' => max(0, min(365, (int) ($_POST['database_backup_interval_days'] ?? 7))),
                 'items_per_page' => max(1, min(500, (int) ($_POST['items_per_page'] ?? 20))),
                 'passenger_card_layout' => in_array(($_POST['passenger_card_layout'] ?? 'dual'), ['single', 'dual'], true) ? $_POST['passenger_card_layout'] : 'dual',
-                'pickup_info' => $_POST['pickup_info'] ?? '',
-                'staff_notification_email' => $_POST['staff_notification_email'] ?? '',
+                'pickup_info' => $db_settings['pickup_info'] ?? '',
+                'staff_notification_email' => $db_settings['staff_notification_email'] ?? '',
+                'admin_notification_email' => filter_var($_POST['admin_notification_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $_POST['admin_notification_email'] : '',
+                'notify_admin_supervisor_on_add' => isset($_POST['notify_admin_supervisor_on_add']) ? '1' : '0',
+                'notify_admin_supervisor_on_delete' => isset($_POST['notify_admin_supervisor_on_delete']) ? '1' : '0',
+                'notify_admin_supervisor_on_status' => isset($_POST['notify_admin_supervisor_on_status']) ? '1' : '0',
                 'email_delivery_method' => in_array(($_POST['email_delivery_method'] ?? 'php_mail'), ['php_mail', 'smtp'], true) ? $_POST['email_delivery_method'] : 'php_mail',
                 'smtp_host' => $_POST['smtp_host'] ?? '',
                 'smtp_port' => $_POST['smtp_port'] ?? '25',
@@ -1205,6 +1455,7 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
             // Re-fetch Settings immediately using defaults
             $db_settings = af_settings($pdo);
             $passenger_view_days = $db_settings['passenger_view_days'] ?? 30;
+            $database_backup_interval_days = (int) ($db_settings['database_backup_interval_days'] ?? 7);
             $items_per_page = (int) ($db_settings['items_per_page'] ?? 20);
             if ($items_per_page < 1) {
                 $items_per_page = 20;
@@ -1212,8 +1463,12 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
             $developer_contact_email = filter_var($db_settings['developer_contact_email'] ?? '', FILTER_VALIDATE_EMAIL) ? $db_settings['developer_contact_email'] : '';
             $passenger_card_layout_value = $db_settings['passenger_card_layout'] ?? 'dual';
             $passenger_card_layout = in_array($passenger_card_layout_value, ['single', 'dual'], true) ? $passenger_card_layout_value : 'dual';
-            $pickup_info = $db_settings['pickup_info'] ?? 'Main Terminal, Cabin Recovery Lost & Found Desk. Please bring a valid ID and the reference code.';
+            $pickup_info = af_pickup_info($db_settings, af_get_current_station(), af_stations()[af_get_current_station()] ?? af_get_current_station());
             $staff_notification_email = $db_settings['staff_notification_email'] ?? 'staff@aerofind.online';
+            $admin_notification_email = $db_settings['admin_notification_email'] ?? '';
+            $notify_admin_supervisor_on_add = (string) ($db_settings['notify_admin_supervisor_on_add'] ?? '1') === '1';
+            $notify_admin_supervisor_on_delete = (string) ($db_settings['notify_admin_supervisor_on_delete'] ?? '1') === '1';
+            $notify_admin_supervisor_on_status = (string) ($db_settings['notify_admin_supervisor_on_status'] ?? '1') === '1';
             $smtp_host = $db_settings['smtp_host'] ?? '';
             $email_delivery_method_value = $db_settings['email_delivery_method'] ?? 'php_mail';
             $email_delivery_method = in_array($email_delivery_method_value, ['php_mail', 'smtp'], true) ? $email_delivery_method_value : 'php_mail';
@@ -1240,7 +1495,7 @@ function syncWithExcel($db_file)
 {
     global $success_msg;
     // Backup existing DB
-    copy($db_file, __DIR__ . '/cabin_db_backup.sqlite');
+    copy($db_file, af_station_backup_file(af_get_current_station()));
     // Run python import script
     $output = shell_exec("python3 " . escapeshellarg(__DIR__ . '/import_excel.py') . " 2>&1");
     // Update last sync time
@@ -1292,10 +1547,37 @@ if (!isset($_SESSION['cabin_staff_loggedin']) || $_SESSION['cabin_staff_loggedin
                     <?= af_brand_logo_html($db_settings, 'w-full h-full rounded-2xl') ?>
                 </div>
                 <h1 class="text-2xl font-bold"><?= af_h($company_short_name) ?> Operations</h1>
-                <p class="text-slate-400 text-sm mt-1">Authorized Staff Only</p>
+                <p class="text-slate-400 text-sm mt-1"><?= $needs_initial_setup ? 'Create the first admin account' : 'Authorized Staff Only' ?></p>
             </div>
             <?php if (isset($login_error))
-                echo "<div class='bg-rose-500/10 border border-rose-500/20 text-rose-500 p-3 rounded-xl text-sm mb-6 text-center'>$login_error</div>"; ?>
+                echo "<div class='bg-rose-500/10 border border-rose-500/20 text-rose-500 p-3 rounded-xl text-sm mb-6 text-center'>" . af_h($login_error) . "</div>"; ?>
+            <?php if ($needs_initial_setup): ?>
+            <form method="POST" class="space-y-4">
+                <div>
+                    <label
+                        class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Admin Username</label>
+                    <input type="text" name="setup_admin_username" required
+                        class="w-full bg-[var(--input)] border-[var(--border)] rounded-xl px-4 py-3 focus:border-rose-500 outline-none transition-all"
+                        placeholder="admin">
+                </div>
+                <div>
+                    <label
+                        class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Admin Password</label>
+                    <input type="password" name="setup_admin_password" required minlength="12"
+                        class="w-full bg-[var(--input)] border-[var(--border)] rounded-xl px-4 py-3 focus:border-rose-500 outline-none transition-all"
+                        placeholder="At least 12 characters">
+                </div>
+                <div>
+                    <label
+                        class="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Confirm Password</label>
+                    <input type="password" name="setup_admin_password_confirm" required minlength="12"
+                        class="w-full bg-[var(--input)] border-[var(--border)] rounded-xl px-4 py-3 focus:border-rose-500 outline-none transition-all"
+                        placeholder="Repeat password">
+                </div>
+                <button type="submit"
+                    class="w-full bg-rose-500 hover:bg-rose-600 py-3.5 rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-500/20 mt-4">Create Admin</button>
+            </form>
+            <?php else: ?>
             <form method="POST" class="space-y-4">
                 <div>
                     <label
@@ -1314,6 +1596,7 @@ if (!isset($_SESSION['cabin_staff_loggedin']) || $_SESSION['cabin_staff_loggedin
                 <button type="submit"
                     class="w-full bg-rose-500 hover:bg-rose-600 py-3.5 rounded-xl font-black text-xs uppercase tracking-widest transition-all shadow-lg shadow-rose-500/20 mt-4">Authenticate</button>
             </form>
+            <?php endif; ?>
             <?php /* if ($developer_contact_email !== ''): ?>
 <p class="text-center text-[10px] uppercase tracking-widest text-slate-500 mt-6">
     Developer Contact:
@@ -1658,6 +1941,21 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         .pending-mobile-meta {
             display: none;
+        }
+
+        .staff-pending-table tbody tr:not(.pending-empty-row) {
+            vertical-align: middle;
+        }
+
+        .staff-pending-table .pending-actions button {
+            border-radius: 0.375rem;
+            padding: 0.35rem 0.55rem;
+            line-height: 1;
+            min-height: 1.6rem;
+        }
+
+        .staff-pending-table .pending-action-form input {
+            min-height: 1.6rem;
         }
 
         .select-compact {
@@ -2473,8 +2771,30 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.4s ease;
         }
 
+        .staff-fab.is-dragging {
+            transition: none;
+            user-select: none;
+        }
+
         .staff-fab-item {
             transition: transform 0.35s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.35s ease, visibility 0.35s;
+        }
+
+        .staff-fab .staff-fab-item,
+        .staff-fab .fab-toggle-control {
+            width: 3.75rem !important;
+            height: 3.75rem !important;
+            border-radius: 1.45rem !important;
+        }
+
+        @media (min-width: 768px) {
+
+            .staff-fab .staff-fab-item,
+            .staff-fab .fab-toggle-control {
+                width: 4rem !important;
+                height: 4rem !important;
+                border-radius: 1.55rem !important;
+            }
         }
 
         .staff-fab.collapsed .staff-fab-item {
@@ -2482,6 +2802,59 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             opacity: 0;
             visibility: hidden;
             pointer-events: none;
+        }
+
+        .fab-toggle-control {
+            background: linear-gradient(145deg, rgba(15, 23, 42, 0.96), rgba(30, 41, 59, 0.94));
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            box-shadow: 0 18px 36px rgba(15, 23, 42, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+            cursor: grab;
+            touch-action: none;
+        }
+
+        .fab-toggle-control:hover,
+        .fab-toggle-control[aria-expanded="false"] {
+            color: #fff;
+            border-color: rgba(244, 63, 94, 0.45);
+            box-shadow: 0 18px 36px rgba(15, 23, 42, 0.32), 0 0 0 4px rgba(244, 63, 94, 0.12);
+        }
+
+        .fab-toggle-control:focus-visible {
+            outline: 2px solid rgba(244, 63, 94, 0.7);
+            outline-offset: 3px;
+        }
+
+        .fab-toggle-control:active {
+            cursor: grabbing;
+        }
+
+        .fab-toggle-control::before {
+            content: '';
+            position: absolute;
+            inset: 0.42rem;
+            border-radius: 0.95rem;
+            background: rgba(255, 255, 255, 0.06);
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+
+        .fab-toggle-control:hover::before,
+        .fab-toggle-control[aria-expanded="false"]::before {
+            opacity: 1;
+        }
+
+        .fab-toggle-control svg {
+            position: relative;
+            z-index: 1;
+        }
+
+        img[data-smooth-image] {
+            opacity: 0;
+            transition: opacity 0.35s ease;
+        }
+
+        img[data-smooth-image].is-loaded {
+            opacity: 1;
         }
     </style>
     <script>
@@ -2753,16 +3126,17 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 New Item</span>
         </button>
         <!-- Toggle Collapse Button -->
-        <button onclick="toggleFab()" id="fab-toggle-btn"
-            class="w-12 h-12 md:w-14 md:h-14 bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white rounded-2xl flex items-center justify-center shadow-2xl transition-all group relative self-end">
+        <button onclick="if (window.__staffFabSuppressClick) { window.__staffFabSuppressClick = false; return; } toggleFab()" id="fab-toggle-btn" type="button" aria-label="Collapse quick actions"
+            aria-expanded="true" title="Collapse quick actions"
+            class="fab-toggle-control w-12 h-12 md:w-14 md:h-14 text-slate-300 rounded-2xl flex items-center justify-center transition-all group relative self-end overflow-hidden">
             <svg id="fab-toggle-svg"
-                class="w-5 h-5 text-slate-400 group-hover:text-white transition-transform duration-300" fill="none"
-                stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M5 5l7 7-7 7" />
+                class="w-5 h-5 transition-transform duration-300" fill="none"
+                stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M6 9l6 6 6-6" />
             </svg>
             <span id="fab-toggle-tooltip"
-                class="absolute right-full mr-4 px-3 py-1 bg-slate-900 text-white text-[10px] font-black rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none uppercase tracking-widest">Collapse
-                Menu</span>
+                class="absolute right-full mr-4 px-3 py-1.5 bg-slate-950/95 border border-white/10 text-white text-[10px] font-black rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none uppercase tracking-widest shadow-xl">Collapse
+                Quick Actions</span>
         </button>
     </div>
 
@@ -2796,7 +3170,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </div>
                         <div class="bg-[var(--input)] border border-[var(--border)] rounded-2xl p-4">
                             <p class="text-[9px] font-black uppercase tracking-widest text-slate-500 mb-2">Access Level</p>
-                            <p class="text-sm font-bold">Admin</p>
+                            <p class="text-sm font-bold"><?= af_h(ucfirst(current_staff_role())) ?></p>
                         </div>
                     </div>
                 </div>
@@ -2847,7 +3221,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             onchange="document.getElementById('other_info_input').value = this.value + ' ' + document.getElementById('flight_num_input').value">
                             <option value="">Select Airline...</option>
                             <?php foreach ($al as $a): ?>
-                                <option value="<?= af_h($a['name']) ?>"><?= af_h($a['name']) ?></option>
+                                <option value="<?= af_h(strtoupper($a['code'])) ?>"><?= af_h($a['name']) ?> (<?= af_h(strtoupper($a['code'])) ?>)</option>
                             <?php endforeach; ?>
                         </select>
                     </div>
@@ -2926,9 +3300,17 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     </div>
                 </div>
 
-                <!-- Row 5: Notes & Handover -->
+                <!-- Row 5: Notes -->
                 <div class="border-t border-[var(--border)] pt-3 mt-1.5">
                     <div class="grid grid-cols-2 gap-3">
+                        <div class="group">
+                            <label
+                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
+                                Name</label>
+                            <input type="text" name="staff_member_name" required
+                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
+                                placeholder="Your name">
+                        </div>
                         <div class="group">
                             <label
                                 class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
@@ -2936,14 +3318,6 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <input type="text" name="user_comments"
                                 class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
                                 placeholder="e.g. Found near seat belt slot">
-                        </div>
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Handover
-                                & Delivery Notes</label>
-                            <input type="text" name="delivery_info"
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="e.g. Awaiting claimant pickup">
                         </div>
                     </div>
                 </div>
@@ -2978,7 +3352,12 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <div
                         class="staff-modal-icon w-10 h-10 bg-blue-500/10 text-blue-500 rounded-xl flex items-center justify-center text-lg font-black">
                         ✈</div>
-                    <h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Airline Management</h2>
+                    <div class="min-w-0">
+                        <h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Airline Management</h2>
+                        <p class="text-[9px] font-black uppercase tracking-widest text-[var(--secondary)] mt-1">
+                            <?= af_h(af_get_current_station()) ?> - <?= af_h(af_stations()[af_get_current_station()] ?? af_get_current_station()) ?>
+                        </p>
+                    </div>
                 </div>
                 <form method="POST" class="airline-add-form flex gap-2 mb-5">
                     <input type="hidden" name="action" value="add_airline">
@@ -2998,6 +3377,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <div class="flex items-center gap-3 min-w-0">
                                 <img src="<?= af_h($a['logo']) ?>"
                                     class="w-9 h-9 rounded-lg object-contain bg-white p-1.5 shrink-0"
+                                    loading="lazy" decoding="async" data-smooth-image
                                     onerror="this.src='https://ui-avatars.com/api/?name=<?= urlencode($a['name']) ?>'">
                                 <div class="min-w-0">
                                     <p class="text-[13px] font-bold tracking-tight"><?= af_h($a['name']) ?></p>
@@ -3126,35 +3506,6 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 <div class="grid grid-cols-2 gap-3">
                                     <div class="group">
                                         <label
-                                            class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
-                                            Username</label>
-                                        <input type="text" name="staff_username" required
-                                            value="<?= af_h($staff_username) ?>"
-                                            class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
-                                            placeholder="admin">
-                                    </div>
-                                    <div class="group">
-                                        <label
-                                            class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">New
-                                            Staff Password</label>
-                                        <input type="password" name="staff_password"
-                                            class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
-                                            placeholder="Leave blank to keep current password">
-                                    </div>
-                                </div>
-
-                                <div class="group">
-                                    <label
-                                        class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
-                                        Email</label>
-                                    <input type="email" name="staff_login_email" value="<?= af_h($staff_login_email) ?>"
-                                        class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
-                                        placeholder="staff@example.com">
-                                </div>
-
-                                <div class="grid grid-cols-2 gap-3">
-                                    <div class="group">
-                                        <label
                                             class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Admin
                                             Username</label>
                                         <input type="text" name="admin_username" required
@@ -3200,6 +3551,18 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
                                 <div class="group">
                                     <label
+                                        class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Database Backup Interval (Days)</label>
+                                    <input type="number" name="database_backup_interval_days" required min="0" max="365"
+                                        value="<?= $database_backup_interval_days ?>"
+                                        class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
+                                        placeholder="7">
+                                    <p
+                                        class="text-[8px] text-slate-500 mt-1 uppercase font-black tracking-tight leading-relaxed">
+                                        Back up database automatically every X days. Set to 0 to disable automatic backups.</p>
+                                </div>
+
+                                <div class="group">
+                                    <label
                                         class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Lost
                                         Item Card Layout</label>
                                     <select name="passenger_card_layout"
@@ -3216,34 +3579,46 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         Controls the passenger terminal card grid on phones.</p>
                                 </div>
 
-                                <div class="group">
-                                    <label
-                                        class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
-                                        Notification Email</label>
-                                    <input type="email" name="staff_notification_email" required
-                                        value="<?= htmlspecialchars($staff_notification_email) ?>"
-                                        class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
-                                        placeholder="staff@aerofind.online">
-                                    <p
-                                        class="text-[8px] text-slate-500 mt-1 uppercase font-black tracking-tight leading-relaxed">
-                                        Receives claim notifications when passengers request their items.</p>
-                                </div>
-
-                                <div class="group">
-                                    <label
-                                        class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Pick-up
-                                        Location & Info</label>
-                                    <textarea name="pickup_info" required rows="3"
-                                        class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all resize-none"
-                                        placeholder="Location details for passenger claim..."><?= htmlspecialchars($pickup_info) ?></textarea>
-                                    <p
-                                        class="text-[8px] text-slate-500 mt-1 uppercase font-black tracking-tight leading-relaxed">
-                                        Sent in HTML claim emails so passengers know where to collect items.</p>
-                                </div>
                             </div>
 
                             <!-- Column 2: SMTP server configuration -->
                             <div class="space-y-3">
+                                <div class="border-b border-[var(--border)] pb-1 mb-2">
+                                    <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">Admin /
+                                        Station Staff Updates</h3>
+                                </div>
+                                <div class="grid grid-cols-1 gap-3">
+                                    <div class="group">
+                                        <label
+                                            class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Admin
+                                            Notification Email</label>
+                                        <input type="email" name="admin_notification_email"
+                                            value="<?= af_h($admin_notification_email) ?>"
+                                            class="w-full input-dark rounded-lg px-3 py-2 text-xs transition-all"
+                                            placeholder="admin@example.com">
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                    <label class="flex items-center gap-2 text-[8px] font-black uppercase tracking-widest text-slate-500">
+                                        <input type="checkbox" name="notify_admin_supervisor_on_add" value="1"
+                                            <?= $notify_admin_supervisor_on_add ? 'checked' : '' ?>
+                                            class="w-3.5 h-3.5 rounded text-rose-500 bg-slate-900 border-slate-700 focus:ring-rose-500">
+                                        Added
+                                    </label>
+                                    <label class="flex items-center gap-2 text-[8px] font-black uppercase tracking-widest text-slate-500">
+                                        <input type="checkbox" name="notify_admin_supervisor_on_delete" value="1"
+                                            <?= $notify_admin_supervisor_on_delete ? 'checked' : '' ?>
+                                            class="w-3.5 h-3.5 rounded text-rose-500 bg-slate-900 border-slate-700 focus:ring-rose-500">
+                                        Deleted
+                                    </label>
+                                    <label class="flex items-center gap-2 text-[8px] font-black uppercase tracking-widest text-slate-500">
+                                        <input type="checkbox" name="notify_admin_supervisor_on_status" value="1"
+                                            <?= $notify_admin_supervisor_on_status ? 'checked' : '' ?>
+                                            class="w-3.5 h-3.5 rounded text-rose-500 bg-slate-900 border-slate-700 focus:ring-rose-500">
+                                        Status
+                                    </label>
+                                </div>
+
                                 <div class="flex justify-between items-center border-b border-[var(--border)] pb-1 mb-2">
                                     <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">SMTP Mail
                                         Server
@@ -3379,6 +3754,24 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <button type="submit"
                                 class="bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all">Add
                                 Station</button>
+                            <input type="email" name="station_notification_email" required
+                                class="md:col-span-3 input-dark rounded-lg px-3 py-2 text-xs"
+                                placeholder="Station staff notification email">
+                            <input type="text" name="station_staff_username" required
+                                class="input-dark rounded-lg px-3 py-2 text-xs"
+                                placeholder="Staff username">
+                            <input type="password" name="station_staff_password" required minlength="4"
+                                class="md:col-span-2 input-dark rounded-lg px-3 py-2 text-xs"
+                                placeholder="Staff password">
+                            <input type="text" name="station_supervisor_username" required
+                                class="input-dark rounded-lg px-3 py-2 text-xs"
+                                placeholder="Supervisor username">
+                            <input type="password" name="station_supervisor_password" required minlength="4"
+                                class="md:col-span-2 input-dark rounded-lg px-3 py-2 text-xs"
+                                placeholder="Supervisor password">
+                            <textarea name="station_pickup_info" required rows="2"
+                                class="md:col-span-3 input-dark rounded-lg px-3 py-2 text-xs resize-none"
+                                placeholder="Station collection desk, terminal, opening hours, ID requirements..."></textarea>
                         </form>
 
                         <div class="space-y-2 max-h-[420px] overflow-y-auto custom-scroll pr-1">
@@ -3386,18 +3779,26 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 <?php
                                 $station_settings = af_settings(station_pdo_for_admin($station_code));
                                 $station_staff_username = $station_settings['staff_username'] ?? 'admin';
-                                $station_admin_username = $station_settings['admin_username'] ?? 'admin';
+                                $station_supervisor_username = $station_settings['supervisor_username'] ?? '';
+                                $station_pickup_info = af_pickup_info($station_settings, $station_code, $station_name);
+                                $station_notification_email = $station_settings['staff_notification_email'] ?? '';
                                 ?>
                                 <div class="bg-[var(--input)] border border-[var(--border)] rounded-2xl p-3 space-y-3">
-                                    <div class="flex items-center justify-between gap-3">
-                                        <div class="min-w-0">
-                                            <p class="text-sm font-black text-[var(--text)] uppercase tracking-tight">
-                                                <?= af_h($station_code) ?> - <?= af_h($station_name) ?>
-                                            </p>
-                                            <p class="text-[8px] text-slate-500 uppercase font-black tracking-widest truncate">
-                                                <?= af_h(basename(af_station_db_file($station_code))) ?>
-                                            </p>
-                                        </div>
+                                    <div class="flex items-center justify-between gap-2">
+                                        <button type="button"
+                                            onclick="toggleStationCard('station-card-<?= af_h($station_code) ?>', 'station-card-chevron-<?= af_h($station_code) ?>')"
+                                            class="flex items-center gap-3 min-w-0 text-left flex-1 rounded-xl hover:bg-rose-500/5 transition-all">
+                                            <span id="station-card-chevron-<?= af_h($station_code) ?>"
+                                                class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200 shrink-0">▶</span>
+                                            <span class="min-w-0">
+                                                <span class="block text-sm font-black text-[var(--text)] uppercase tracking-tight">
+                                                    <?= af_h($station_code) ?> - <?= af_h($station_name) ?>
+                                                </span>
+                                                <span class="block text-[8px] text-slate-500 uppercase font-black tracking-widest truncate">
+                                                    <?= af_h($station_notification_email ?: 'No notification email') ?>
+                                                </span>
+                                            </span>
+                                        </button>
                                         <?php if (count(af_stations()) > 1): ?>
                                             <form method="POST"
                                                 onsubmit="event.preventDefault(); const form = this; toast.confirm('Remove this station from the selector? The database file will be left on disk.', () => form.submit(), null, { title: 'Remove Station', confirmText: 'Remove', intent: 'danger' });">
@@ -3409,7 +3810,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         <?php endif; ?>
                                     </div>
 
-                                    <form method="POST" class="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                    <form id="station-card-<?= af_h($station_code) ?>" method="POST"
+                                        class="grid grid-cols-1 md:grid-cols-2 gap-2" style="display:none">
                                         <input type="hidden" name="action" value="update_station_credentials">
                                         <input type="hidden" name="station_code" value="<?= af_h($station_code) ?>">
                                         <div class="md:col-span-2">
@@ -3418,6 +3820,23 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                 Name</label>
                                             <input type="text" name="station_name" required value="<?= af_h($station_name) ?>"
                                                 class="w-full input-dark rounded-lg px-3 py-2 text-xs">
+                                        </div>
+                                        <div class="md:col-span-2">
+                                            <label
+                                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Pick-up
+                                                Location & Info</label>
+                                            <textarea name="station_pickup_info" required rows="3"
+                                                class="w-full input-dark rounded-lg px-3 py-2 text-xs resize-none"
+                                                placeholder="Station collection desk, terminal, opening hours, ID requirements..."><?= af_h($station_pickup_info) ?></textarea>
+                                        </div>
+                                        <div class="md:col-span-2">
+                                            <label
+                                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
+                                                Notification Email</label>
+                                            <input type="email" name="station_notification_email" required
+                                                value="<?= af_h($station_notification_email) ?>"
+                                                class="w-full input-dark rounded-lg px-3 py-2 text-xs"
+                                                placeholder="station-staff@example.com">
                                         </div>
                                         <div>
                                             <label
@@ -3431,29 +3850,31 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             <label
                                                 class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">New
                                                 Staff Password</label>
-                                            <input type="password" name="station_staff_password"
+                                                <input type="password" name="station_staff_password"
+                                                    minlength="4"
                                                 class="w-full input-dark rounded-lg px-3 py-2 text-xs"
                                                 placeholder="Leave blank to keep current">
                                         </div>
                                         <div>
                                             <label
-                                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Admin
+                                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Supervisor
                                                 Username</label>
-                                            <input type="text" name="station_admin_username" required
-                                                value="<?= af_h($station_admin_username) ?>"
+                                            <input type="text" name="station_supervisor_username" required
+                                                value="<?= af_h($station_supervisor_username) ?>"
                                                 class="w-full input-dark rounded-lg px-3 py-2 text-xs">
                                         </div>
                                         <div>
                                             <label
                                                 class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">New
-                                                Admin Password</label>
-                                            <input type="password" name="station_admin_password"
+                                                Supervisor Password</label>
+                                                <input type="password" name="station_supervisor_password"
+                                                    minlength="4"
                                                 class="w-full input-dark rounded-lg px-3 py-2 text-xs"
                                                 placeholder="Leave blank to keep current">
                                         </div>
                                         <button type="submit"
                                             class="md:col-span-2 bg-[var(--card)] hover:bg-rose-500/10 border border-[var(--border)] hover:border-rose-500/30 text-[var(--text)] px-4 py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all">
-                                            Save <?= af_h($station_code) ?> Credentials
+                                            Save <?= af_h($station_code) ?> Settings
                                         </button>
                                     </form>
                                 </div>
@@ -3583,32 +4004,156 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     </div>
 
     <script>
+        function enhanceSmoothImages(root = document) {
+            root.querySelectorAll('img[loading="lazy"]:not([data-smooth-bound])').forEach(img => {
+                img.dataset.smoothImage = '1';
+                img.dataset.smoothBound = '1';
+                const reveal = () => img.classList.add('is-loaded');
+                if (img.complete && img.naturalWidth > 0) {
+                    requestAnimationFrame(reveal);
+                } else {
+                    img.addEventListener('load', reveal, { once: true });
+                    img.addEventListener('error', reveal, { once: true });
+                }
+            });
+        }
+
+        document.addEventListener('DOMContentLoaded', () => enhanceSmoothImages());
+
+        function clampFabPosition(left, top, fab) {
+            const margin = 16;
+            const rect = fab.getBoundingClientRect();
+            const maxLeft = Math.max(margin, window.innerWidth - rect.width - margin);
+            const maxTop = Math.max(margin, window.innerHeight - rect.height - margin);
+
+            return {
+                left: Math.min(Math.max(left, margin), maxLeft),
+                top: Math.min(Math.max(top, margin), maxTop)
+            };
+        }
+
+        function setFabPosition(left, top) {
+            const fab = document.querySelector('.staff-fab');
+            if (!fab) return;
+
+            const position = clampFabPosition(left, top, fab);
+            fab.style.left = `${position.left}px`;
+            fab.style.top = `${position.top}px`;
+            fab.style.right = 'auto';
+            fab.style.bottom = 'auto';
+            localStorage.setItem('staff_fab_position', JSON.stringify(position));
+        }
+
+        function restoreFabPosition() {
+            const fab = document.querySelector('.staff-fab');
+            if (!fab) return;
+
+            try {
+                const saved = JSON.parse(localStorage.getItem('staff_fab_position') || 'null');
+                if (saved && Number.isFinite(saved.left) && Number.isFinite(saved.top)) {
+                    setFabPosition(saved.left, saved.top);
+                }
+            } catch (error) {
+                localStorage.removeItem('staff_fab_position');
+            }
+        }
+
+        function makeFabFloatable() {
+            const fab = document.querySelector('.staff-fab');
+            const button = document.getElementById('fab-toggle-btn');
+            if (!fab || !button || button.dataset.floatableReady === 'true') return;
+
+            button.dataset.floatableReady = 'true';
+            let dragState = null;
+
+            button.addEventListener('pointerdown', (event) => {
+                if (event.button !== undefined && event.button !== 0) return;
+
+                const rect = fab.getBoundingClientRect();
+                dragState = {
+                    pointerId: event.pointerId,
+                    startX: event.clientX,
+                    startY: event.clientY,
+                    left: rect.left,
+                    top: rect.top,
+                    moved: false
+                };
+
+                fab.classList.add('is-dragging');
+                button.setPointerCapture(event.pointerId);
+            });
+
+            button.addEventListener('pointermove', (event) => {
+                if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+                const deltaX = event.clientX - dragState.startX;
+                const deltaY = event.clientY - dragState.startY;
+                if (Math.abs(deltaX) > 4 || Math.abs(deltaY) > 4) {
+                    dragState.moved = true;
+                }
+
+                if (dragState.moved) {
+                    event.preventDefault();
+                    setFabPosition(dragState.left + deltaX, dragState.top + deltaY);
+                }
+            });
+
+            function endDrag(event) {
+                if (!dragState || dragState.pointerId !== event.pointerId) return;
+
+                fab.classList.remove('is-dragging');
+                if (dragState.moved) {
+                    window.__staffFabSuppressClick = true;
+                }
+                dragState = null;
+            }
+
+            button.addEventListener('pointerup', endDrag);
+            button.addEventListener('pointercancel', endDrag);
+            window.addEventListener('resize', restoreFabPosition);
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            restoreFabPosition();
+            makeFabFloatable();
+        });
+
         function toggleFab() {
             const fab = document.querySelector('.staff-fab');
             const svg = document.getElementById('fab-toggle-svg');
-            const tooltip = document.getElementById('fab-toggle-tooltip');
             if (!fab || !svg) return;
             const isCollapsed = fab.classList.toggle('collapsed');
             localStorage.setItem('staff_fab_collapsed', isCollapsed ? 'true' : 'false');
-            if (isCollapsed) {
-                svg.classList.add('rotate-180');
-                if (tooltip) tooltip.textContent = 'Expand Menu';
-            } else {
-                svg.classList.remove('rotate-180');
-                if (tooltip) tooltip.textContent = 'Collapse Menu';
+            updateFabToggleState(isCollapsed);
+        }
+
+        function updateFabToggleState(isCollapsed) {
+            const svg = document.getElementById('fab-toggle-svg');
+            const tooltip = document.getElementById('fab-toggle-tooltip');
+            const button = document.getElementById('fab-toggle-btn');
+            const label = isCollapsed ? 'Expand quick actions' : 'Collapse quick actions';
+            if (svg) {
+                if (isCollapsed) {
+                    svg.classList.add('rotate-180');
+                } else {
+                    svg.classList.remove('rotate-180');
+                }
+            }
+            if (tooltip) tooltip.textContent = label;
+            if (button) {
+                button.setAttribute('aria-expanded', isCollapsed ? 'false' : 'true');
+                button.setAttribute('aria-label', label);
+                button.setAttribute('title', label);
             }
         }
 
         // Initialize FAB state on load
         document.addEventListener('DOMContentLoaded', () => {
             const isCollapsed = localStorage.getItem('staff_fab_collapsed') === 'true';
+            updateFabToggleState(isCollapsed);
             if (isCollapsed) {
                 const fab = document.querySelector('.staff-fab');
-                const svg = document.getElementById('fab-toggle-svg');
-                const tooltip = document.getElementById('fab-toggle-tooltip');
                 if (fab) fab.classList.add('collapsed');
-                if (svg) svg.classList.add('rotate-180');
-                if (tooltip) tooltip.textContent = 'Expand Menu';
             }
         });
 
@@ -3671,6 +4216,15 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             if (!body || !chevron) return;
             const isOpen = body.style.display !== 'none';
             body.style.display = isOpen ? 'none' : 'block';
+            chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+        }
+
+        function toggleStationCard(bodyId, chevronId) {
+            const body = document.getElementById(bodyId);
+            const chevron = document.getElementById(chevronId);
+            if (!body || !chevron) return;
+            const isOpen = body.style.display !== 'none';
+            body.style.display = isOpen ? 'none' : 'grid';
             chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
         }
 
@@ -3788,7 +4342,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         function prefillIonos() {
             document.getElementsByName('email_delivery_method')[0].value = 'smtp';
-            document.getElementsByName('smtp_host')[0].value = 'smtp.ionos.com';
+            document.getElementsByName('smtp_host')[0].value = 'smtp.ionos.de';
             document.getElementsByName('smtp_port')[0].value = '587';
             document.getElementsByName('smtp_encryption')[0].value = 'tls';
             document.getElementsByName('smtp_user')[0].focus();
@@ -3802,11 +4356,87 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             tr.classList.toggle('is-expanded');
         }
 
-        function saveRow(tagNo) {
+        const PHOTO_COMPRESS_MAX_DIMENSION = 1280;
+        const PHOTO_COMPRESS_QUALITY = 0.68;
+
+        function canBrowserCompressImage(file) {
+            return file
+                && ['image/jpeg', 'image/png', 'image/webp'].includes(file.type)
+                && typeof createImageBitmap === 'function'
+                && typeof DataTransfer !== 'undefined';
+        }
+
+        async function compressImageFile(file) {
+            if (!canBrowserCompressImage(file)) return file;
+            const bitmap = await createImageBitmap(file);
+            const scale = Math.min(1, PHOTO_COMPRESS_MAX_DIMENSION / Math.max(bitmap.width, bitmap.height));
+            const width = Math.max(1, Math.round(bitmap.width * scale));
+            const height = Math.max(1, Math.round(bitmap.height * scale));
+            const canvas = document.createElement('canvas');
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d', { alpha: false });
+            ctx.fillStyle = '#fff';
+            ctx.fillRect(0, 0, width, height);
+            ctx.drawImage(bitmap, 0, 0, width, height);
+            bitmap.close?.();
+
+            const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', PHOTO_COMPRESS_QUALITY));
+            if (!blob || blob.size >= file.size) return file;
+            const name = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+            return new File([blob], name, { type: 'image/jpeg', lastModified: Date.now() });
+        }
+
+        async function compressFileInput(input) {
+            const file = input?.files?.[0];
+            if (!file) return;
+            const compressed = await compressImageFile(file);
+            if (compressed === file) return;
+            const transfer = new DataTransfer();
+            transfer.items.add(compressed);
+            input.files = transfer.files;
+        }
+
+        document.addEventListener('submit', async function (event) {
+            if (event.defaultPrevented) return;
+            const form = event.target;
+            if (!(form instanceof HTMLFormElement) || form.dataset.photoCompressed === '1') return;
+            const inputs = Array.from(form.querySelectorAll('input[type="file"][name="photo"]'))
+                .filter(input => input.files && input.files.length > 0);
+            if (!inputs.length) return;
+
+            event.preventDefault();
+            try {
+                await Promise.all(inputs.map(compressFileInput));
+            } finally {
+                form.dataset.photoCompressed = '1';
+                form.submit();
+            }
+        });
+
+        async function saveRow(tagNo) {
             const form = document.getElementById('form-' + tagNo);
             if (!form) return;
             const row = form.closest('tr');
             if (!row) return;
+            const internalNote = row.querySelector(`[name="user_comments"][form="form-${tagNo}"]`);
+            const handoverNote = row.querySelector(`[name="delivery_info"][form="form-${tagNo}"]`);
+            const internalUpdateAuthor = form.querySelector('[name="internal_update_author"]');
+            const handoverUpdateAuthor = form.querySelector('[name="handover_update_author"]');
+            const statusSelect = row.querySelector(`[name="status"][form="form-${tagNo}"]`);
+            const statusChanged = statusSelect && statusSelect.value !== (statusSelect.dataset.currentStatus || '');
+            const needsStatusStaff = statusChanged && ['Lost', 'Disposed'].includes(statusSelect.value);
+
+            if (internalUpdateAuthor && ((internalNote && internalNote.value.trim()) || needsStatusStaff)) {
+                const name = await requestStaffName(needsStatusStaff && !(internalNote && internalNote.value.trim()) ? 'Staff name for this status update' : 'Staff name for this internal note');
+                if (!name) return;
+                internalUpdateAuthor.value = name;
+            }
+            if (handoverUpdateAuthor && handoverNote && handoverNote.value.trim()) {
+                const name = await requestStaffName('Staff name for this handover note');
+                if (!name) return;
+                handoverUpdateAuthor.value = name;
+            }
 
             // Find all input/select elements associated with this form
             const inputs = row.querySelectorAll(`[form="form-${tagNo}"]`);
@@ -3827,6 +4457,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     hidden.value = input.value;
                 }
             });
+            const photoInput = form.querySelector('input[type="file"][name="photo"]');
+            if (photoInput && photoInput.files && photoInput.files.length > 0) {
+                await compressFileInput(photoInput);
+            }
             form.submit();
         }
 
@@ -3983,6 +4617,59 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 setTimeout(() => card.classList.add('show'), 50);
             }
 
+            input(message, onSubmit, onCancel = null, options = {}) {
+                const card = document.createElement('div');
+                const titleText = options.title || 'Staff Name';
+                const submitText = options.submitText || 'Continue';
+                const defaultValue = options.value || '';
+                card.className = 'toast-card border-blue-500/30 text-blue-400 shadow-2xl shadow-blue-500/20 !max-w-[450px]';
+                card.innerHTML = `
+                    <div class="w-8 h-8 rounded-full bg-blue-500/10 text-blue-400 flex items-center justify-center shrink-0">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14c-4.418 0-8 2.239-8 5v1h16v-1c0-2.761-3.582-5-8-5z"></path></svg>
+                    </div>
+                    <div class="flex flex-col flex-grow min-w-0 pr-4">
+                        <span class="text-[10px] font-black uppercase tracking-widest opacity-80 leading-tight">${titleText}</span>
+                        <span class="text-xs font-semibold text-slate-100 mt-1 leading-relaxed break-words">${message}</span>
+                        <input type="text" class="staff-toast-input mt-3 bg-slate-950/60 border border-white/10 rounded-lg px-3 py-2 text-xs text-slate-100 outline-none focus:border-blue-400" placeholder="Your name" value="${String(defaultValue).replace(/"/g, '&quot;')}">
+                        <div class="flex items-center gap-2 mt-3">
+                            <button class="submit-btn px-3 py-1.5 bg-blue-500 hover:bg-blue-600 text-white rounded-lg text-[9px] font-black uppercase tracking-widest transition-all shadow-md shadow-blue-500/20 hover:scale-[1.03] active:scale-[0.98]">${submitText}</button>
+                            <button class="cancel-btn px-3 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 dark:bg-slate-800 dark:hover:bg-slate-700 dark:text-slate-300 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all hover:scale-[1.03] active:scale-[0.98]">Cancel</button>
+                        </div>
+                    </div>
+                    <button class="close-btn text-slate-400 hover:text-slate-200 transition-colors text-base font-bold leading-none shrink-0 self-start">&times;</button>
+                `;
+                const input = card.querySelector('.staff-toast-input');
+                const submitBtn = card.querySelector('.submit-btn');
+                const cancelBtn = card.querySelector('.cancel-btn');
+                const closeBtn = card.querySelector('.close-btn');
+                const submit = () => {
+                    const value = input.value.trim();
+                    if (!value) {
+                        input.focus();
+                        return;
+                    }
+                    this.remove(card);
+                    if (onSubmit) onSubmit(value);
+                };
+                submitBtn.onclick = submit;
+                input.addEventListener('keydown', (event) => {
+                    if (event.key === 'Enter') submit();
+                    if (event.key === 'Escape') {
+                        this.remove(card);
+                        if (onCancel) onCancel();
+                    }
+                });
+                cancelBtn.onclick = closeBtn.onclick = () => {
+                    this.remove(card);
+                    if (onCancel) onCancel();
+                };
+                this.container.appendChild(card);
+                setTimeout(() => {
+                    card.classList.add('show');
+                    input.focus();
+                }, 50);
+            }
+
             remove(card) {
                 if (!card.parentNode) return;
                 clearTimeout(card.dataset.timeoutId);
@@ -4012,8 +4699,36 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     window.toastManager = new ToastManager();
                 }
                 window.toastManager.confirm(message, onConfirm, onCancel, options);
+            },
+            input: (message, onSubmit, onCancel = null, options = {}) => {
+                if (!window.toastManager) {
+                    window.toastManager = new ToastManager();
+                }
+                window.toastManager.input(message, onSubmit, onCancel, options);
             }
         };
+
+        function requestStaffName(message, value = '') {
+            return new Promise(resolve => {
+                toast.input(message, resolve, () => resolve(''), {
+                    title: 'Staff Name',
+                    submitText: 'Use Name',
+                    value
+                });
+            });
+        }
+
+        async function confirmPickupWithStaffName(form, tagNo) {
+            const name = await requestStaffName('Staff name for pickup handover');
+            if (!name) return false;
+            form.pickup_staff_name.value = name;
+            toast.confirm(`Mark item ${tagNo} as picked up and done?`, () => form.submit(), null, {
+                title: 'Confirm Pickup',
+                confirmText: 'Yes, Pick Up',
+                intent: 'success'
+            });
+            return false;
+        }
     </script>
 
     <div class="max-w-7xl mx-auto px-4 pb-12">
@@ -4052,9 +4767,9 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <?php if ($status_f === 'Pending' || !empty($pending_reports)): ?>
             <div
-                class="bg-[var(--card)] border border-[var(--border)] rounded-xl shadow-sm transition-colors overflow-hidden mb-4">
+                class="bg-[var(--card)] border border-[var(--border)] rounded-lg shadow-sm transition-colors overflow-hidden mb-4">
                 <div
-                    class="px-4 py-3 bg-amber-500/10 border-b border-[var(--border)] flex items-center justify-between gap-3">
+                    class="px-3 py-2 bg-amber-500/10 border-b border-[var(--border)] flex items-center justify-between gap-3">
                     <div>
                         <p class="text-[9px] font-black uppercase tracking-widest text-amber-500">Passenger Reports Awaiting
                             Approval</p>
@@ -4067,14 +4782,14 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <?php endif; ?>
                 </div>
                 <div class="overflow-x-auto">
-                    <table class="staff-pending-table w-full text-left table-fixed min-w-[980px]">
+                    <table class="staff-pending-table w-full text-left table-fixed min-w-[860px]">
                         <thead class="bg-[var(--bg)] border-b border-[var(--border)]">
                             <tr class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">
-                                <th class="px-3 py-2 w-[18%]">Reference</th>
-                                <th class="px-3 py-2 w-[24%]">Item</th>
-                                <th class="px-3 py-2 w-[14%]">Flight</th>
-                                <th class="px-3 py-2 w-[18%]">Passenger</th>
-                                <th class="px-3 py-2 w-[26%] text-right">Decision</th>
+                                <th class="px-2 py-1.5 w-[16%]">Reference</th>
+                                <th class="px-2 py-1.5 w-[25%]">Item</th>
+                                <th class="px-2 py-1.5 w-[12%]">Flight</th>
+                                <th class="px-2 py-1.5 w-[17%]">Passenger</th>
+                                <th class="px-2 py-1.5 w-[30%] text-right">Decision</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-[var(--border)]">
@@ -4092,7 +4807,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 <?php $pending_photo = $report['photo'] ? 'uploads/cabin_items/' . $report['photo'] : ''; ?>
                                 <tr class="pending-report-row hover:bg-amber-500/5 cursor-pointer lg:cursor-default"
                                     onclick="toggleRowExpansion(this, event)">
-                                    <td class="px-3 py-2" data-label="Reference">
+                                    <td class="px-2 py-1.5" data-label="Reference">
                                         <p class="text-[10px] font-black text-amber-500 uppercase">
                                             <?= af_h($report['tag_no'] ?: $report['report_ref']) ?>
                                         </p>
@@ -4100,11 +4815,12 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             <?= af_h(date('d M Y H:i', strtotime($report['created_at'] ?? 'now'))) ?>
                                         </p>
                                     </td>
-                                    <td class="px-3 py-2" data-label="Item">
+                                    <td class="px-2 py-1.5" data-label="Item">
                                         <div class="flex items-center gap-2">
                                             <?php if ($pending_photo): ?>
                                                 <img src="<?= af_h($pending_photo) ?>" onclick="zoomImage(this.src)"
-                                                    class="w-9 h-9 rounded-md object-cover border border-[var(--border)] cursor-pointer">
+                                                    class="w-8 h-8 rounded-md object-cover border border-[var(--border)] cursor-pointer"
+                                                    loading="lazy" decoding="async" data-smooth-image>
                                             <?php endif; ?>
                                             <p class="text-[10px] font-bold text-[var(--text)] leading-snug">
                                                 <span class="pending-mobile-meta text-[7px] font-black text-amber-500 uppercase tracking-widest mb-0.5">
@@ -4117,7 +4833,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             </p>
                                         </div>
                                     </td>
-                                    <td class="px-3 py-2" data-label="Flight">
+                                    <td class="px-2 py-1.5" data-label="Flight">
                                         <p class="text-[10px] font-black text-[var(--text)] uppercase">
                                             <?= af_h(trim(($report['airline'] ?? '') . ' ' . ($report['flight_number'] ?? ''))) ?>
                                         </p>
@@ -4125,14 +4841,16 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             <?= af_h($report['seat_info'] ?? '') ?>
                                         </p>
                                     </td>
-                                    <td class="px-3 py-2" data-label="Passenger">
-                                        <p class="text-[10px] font-bold text-[var(--text)]"><?= af_h($report['pax_name']) ?></p>
+                                    <td class="px-2 py-1.5" data-label="Passenger">
+                                        <p class="text-[10px] font-bold text-[var(--text)]">
+                                            <?= af_h($report['pax_name']) ?>
+                                        </p>
                                         <p class="text-[8px] font-bold text-[var(--secondary)] truncate">
                                             <?= af_h($report['pax_email']) ?>
                                         </p>
                                     </td>
-                                    <td class="px-3 py-2" data-label="Decision">
-                                        <div class="flex flex-col gap-2 items-end">
+                                    <td class="px-2 py-1.5" data-label="Decision">
+                                        <div class="pending-actions flex flex-wrap gap-1.5 items-center justify-end">
                                             <form method="POST"
                                                 onsubmit="event.preventDefault(); const form=this; toast.confirm('Approve <?= af_h($report['tag_no'] ?: $report['report_ref']) ?> and add it to Lost reports?',()=>form.submit(),null,{title:'Approve Report',confirmText:'Approve',intent:'success'});"
                                                 class="inline-flex justify-end">
@@ -4143,21 +4861,21 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             </form>
                                             <form method="POST"
                                                 onsubmit="event.preventDefault(); if (!this.reportValidity()) return; const form=this; toast.confirm('Mark this passenger report as already logged?',()=>form.submit(),null,{title:'Already Logged',confirmText:'Mark Logged',intent:'success'});"
-                                                class="flex items-center justify-end gap-1.5">
+                                                class="pending-action-form flex items-center justify-end gap-1">
                                                 <input type="hidden" name="action" value="duplicate_pending_report">
                                                 <input type="hidden" name="report_id" value="<?= (int) $report['id'] ?>">
                                                 <input type="text" name="existing_tag_no" placeholder="Existing ID" required
-                                                    class="w-24 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-[9px] text-[var(--text)] uppercase outline-none">
+                                                    class="w-20 bg-[var(--bg)] border border-[var(--border)] rounded-md px-2 py-1 text-[9px] text-[var(--text)] uppercase outline-none">
                                                 <button type="submit"
                                                     class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Logged</button>
                                             </form>
                                             <form method="POST"
                                                 onsubmit="event.preventDefault(); if (!this.reportValidity()) return; const form=this; toast.confirm('Reject this pending report?',()=>form.submit(),null,{title:'Reject Report',confirmText:'Reject',intent:'danger'});"
-                                                class="flex items-center justify-end gap-1.5">
+                                                class="pending-action-form flex items-center justify-end gap-1">
                                                 <input type="hidden" name="action" value="reject_pending_report">
                                                 <input type="hidden" name="report_id" value="<?= (int) $report['id'] ?>">
                                                 <input type="text" name="staff_notes" placeholder="Reason" required
-                                                    class="w-32 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1 text-[9px] text-[var(--text)] outline-none">
+                                                    class="w-24 bg-[var(--bg)] border border-[var(--border)] rounded-md px-2 py-1 text-[9px] text-[var(--text)] outline-none">
                                                 <button type="submit"
                                                     class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Reject</button>
                                             </form>
@@ -4318,6 +5036,17 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 } else {
                                     $row_class = 'hover:bg-rose-500/5 border-l-4 border-l-transparent transition-all duration-300';
                                 }
+                                $edit_disabled_attr = $can_edit_items ? '' : 'disabled';
+                                $edit_readonly_attr = $can_edit_items ? '' : 'readonly';
+                                $edit_input_class = $can_edit_items ? '' : ' opacity-70 cursor-not-allowed';
+                                $internal_staff_name = af_first_note_staff_name((string) ($item['user_comments'] ?? ''));
+                                $handover_staff_name = af_pickup_note_staff_name((string) ($item['delivery_info'] ?? ''));
+                                $internal_note_text = af_latest_note_text((string) ($item['user_comments'] ?? ''));
+                                $handover_note_text = af_latest_note_text((string) ($item['delivery_info'] ?? ''));
+                                $staff_name_readonly_attr = ($is_admin || $is_supervisor) ? '' : 'readonly';
+                                $staff_name_input_class = ($is_admin || $is_supervisor)
+                                    ? 'focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)]'
+                                    : 'cursor-not-allowed';
                                 ?>
                                 <tr class="<?= $row_class ?> staff-inventory-row cursor-pointer lg:cursor-default"
                                     onclick="toggleRowExpansion(this, event)">
@@ -4326,6 +5055,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         <form id="form-<?= $item['tag_no'] ?>" method="POST" enctype="multipart/form-data">
                                             <input type="hidden" name="action" value="update_item">
                                             <input type="hidden" name="tag_no" value="<?= $item['tag_no'] ?>">
+                                            <input type="hidden" name="internal_update_author" value="">
+                                            <input type="hidden" name="handover_update_author" value="">
                                         </form>
                                         <div class="flex items-center gap-2">
                                             <!-- Photo Wrapper with Change Photo support -->
@@ -4335,7 +5066,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                 $img_path = $item['photo'] ? (strpos($item['photo'], 'http') === 0 ? $item['photo'] : 'uploads/cabin_items/' . $item['photo']) : null;
                                                 if ($img_path): ?>
                                                     <img src="<?= $img_path ?>" onclick="zoomImage(this.src)"
-                                                        class="w-8 h-8 rounded-md object-cover border border-[var(--border)] shadow-sm cursor-pointer hover:opacity-85 transition-opacity">
+                                                        class="w-8 h-8 rounded-md object-cover border border-[var(--border)] shadow-sm cursor-pointer hover:opacity-85 transition-opacity"
+                                                        loading="lazy" decoding="async" data-smooth-image>
                                                 <?php else: ?>
                                                     <div
                                                         class="w-8 h-8 rounded-md bg-[var(--bg)] border border-[var(--border)] flex items-center justify-center text-[10px] opacity-50">
@@ -4347,13 +5079,15 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                         </svg>
                                                     </div>
                                                 <?php endif; ?>
-                                                <label
-                                                    class="change-photo-label cursor-pointer text-[6px] font-black uppercase text-rose-500 hover:text-rose-600 transition-all tracking-wider text-center block mt-0.5">
-                                                    Change
-                                                    <input type="file" name="photo" accept="image/jpeg,image/png,image/webp"
-                                                        form="form-<?= $item['tag_no'] ?>" class="hidden"
-                                                        onchange="saveRow('<?= $item['tag_no'] ?>')">
-                                                </label>
+                                                <?php if ($can_change_item_photos): ?>
+                                                    <label
+                                                        class="change-photo-label cursor-pointer text-[6px] font-black uppercase text-rose-500 hover:text-rose-600 transition-all tracking-wider text-center block mt-0.5">
+                                                        Change
+                                                        <input type="file" name="photo" accept="image/jpeg,image/png,image/webp"
+                                                            form="form-<?= $item['tag_no'] ?>" class="hidden"
+                                                            onchange="saveRow('<?= $item['tag_no'] ?>')">
+                                                    </label>
+                                                <?php endif; ?>
                                             </div>
                                             <div class="flex-grow min-w-0">
                                                 <p
@@ -4373,8 +5107,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                 </p>
                                                 <input type="text" name="item_description"
                                                     value="<?= htmlspecialchars($item['item_description']) ?>"
-                                                    form="form-<?= $item['tag_no'] ?>" required
-                                                    class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-bold text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none mt-0.5">
+                                                    form="form-<?= $item['tag_no'] ?>" required <?= $edit_readonly_attr ?>
+                                                    class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-bold text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none mt-0.5<?= $edit_input_class ?>">
                                                 <!-- Original Date exactly from database -->
                                                 <p class="text-[7px] text-[var(--secondary)] uppercase font-black mt-0.5 px-1">
                                                     <?= date('d M Y', strtotime($item['created_at'] ?? 'now')) ?>
@@ -4385,36 +5119,50 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     <td class="px-2 py-1" data-label="Flight">
                                         <input type="text" name="other_info"
                                             value="<?= htmlspecialchars($item['other_info'] ?? '') ?>"
-                                            form="form-<?= $item['tag_no'] ?>" placeholder="e.g. BA204"
-                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-black text-[var(--text)] uppercase px-1 py-0.5 rounded w-full transition-all outline-none">
+                                            form="form-<?= $item['tag_no'] ?>" placeholder="e.g. BA204" <?= $edit_readonly_attr ?>
+                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-black text-[var(--text)] uppercase px-1 py-0.5 rounded w-full transition-all outline-none<?= $edit_input_class ?>">
                                     </td>
                                     <td class="px-2 py-1" data-label="Seat">
                                         <input type="text" name="comments"
                                             value="<?= htmlspecialchars($item['comments'] ?? '') ?>"
-                                            form="form-<?= $item['tag_no'] ?>" placeholder="e.g. 24F"
-                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-black text-[var(--text)] uppercase px-1 py-0.5 rounded w-full transition-all outline-none">
+                                            form="form-<?= $item['tag_no'] ?>" placeholder="e.g. 24F" <?= $edit_readonly_attr ?>
+                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-black text-[var(--text)] uppercase px-1 py-0.5 rounded w-full transition-all outline-none<?= $edit_input_class ?>">
                                     </td>
                                     <td class="px-2 py-1" data-label="Passenger">
                                         <input type="text" name="pax_name"
                                             value="<?= htmlspecialchars($item['pax_name'] ?? '') ?>"
-                                            form="form-<?= $item['tag_no'] ?>" placeholder="Pax Name"
-                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-bold text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none">
+                                            form="form-<?= $item['tag_no'] ?>" placeholder="Pax Name" <?= $edit_readonly_attr ?>
+                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-bold text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none<?= $edit_input_class ?>">
                                     </td>
                                     <td class="px-2 py-1" data-label="Internal">
-                                        <input type="text" name="user_comments"
-                                            value="<?= htmlspecialchars($item['user_comments'] ?? '') ?>"
-                                            form="form-<?= $item['tag_no'] ?>" placeholder="Add internal comment..."
-                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none">
+                                        <div class="text-[9px] text-[var(--secondary)] whitespace-pre-line max-h-14 overflow-y-auto custom-scroll px-1"><?= af_h(af_notes_for_display((string) ($item['user_comments'] ?? ''))) ?></div>
+                                        <?php if ($can_edit_items): ?>
+                                            <input type="text" name="user_comments"
+                                                value=""
+                                                form="form-<?= $item['tag_no'] ?>" placeholder="Add note..."
+                                                class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none mt-1">
+                                            <input type="text" name="internal_note_author"
+                                                form="form-<?= $item['tag_no'] ?>" placeholder="Item added by staff name"
+                                                value="<?= af_h($internal_staff_name) ?>" <?= $staff_name_readonly_attr ?>
+                                                class="bg-transparent border-b border-transparent <?= $staff_name_input_class ?> text-[9px] text-[var(--secondary)] px-1 py-0.5 rounded w-full outline-none mt-0.5">
+                                        <?php endif; ?>
                                     </td>
                                     <td class="px-2 py-1" data-label="Handover">
-                                        <input type="text" name="delivery_info"
-                                            value="<?= htmlspecialchars($item['delivery_info'] ?? '') ?>"
-                                            form="form-<?= $item['tag_no'] ?>" placeholder="Add handover details..."
-                                            class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none">
+                                        <div class="text-[9px] text-[var(--secondary)] whitespace-pre-line max-h-14 overflow-y-auto custom-scroll px-1"><?= af_h(af_notes_for_display((string) ($item['delivery_info'] ?? ''))) ?></div>
+                                        <?php if ($can_edit_items): ?>
+                                            <input type="text" name="delivery_info"
+                                                value=""
+                                                form="form-<?= $item['tag_no'] ?>" placeholder="Add handover..."
+                                                class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none mt-1">
+                                            <input type="text" name="handover_note_author"
+                                                form="form-<?= $item['tag_no'] ?>" placeholder="Item handover by staff name"
+                                                value="<?= af_h($handover_staff_name) ?>" <?= $staff_name_readonly_attr ?>
+                                                class="bg-transparent border-b border-transparent <?= $staff_name_input_class ?> text-[9px] text-[var(--secondary)] px-1 py-0.5 rounded w-full outline-none mt-0.5">
+                                        <?php endif; ?>
                                     </td>
                                     <td class="px-2 py-1 text-center" data-label="Status">
                                         <select name="status" form="form-<?= $item['tag_no'] ?>"
-                                            onchange="saveRow('<?= $item['tag_no'] ?>')"
+                                            onchange="saveRow('<?= $item['tag_no'] ?>')" data-current-status="<?= af_h($item['status'] ?? '') ?>" <?= $edit_disabled_attr ?>
                                             class="bg-[var(--bg)] border border-[var(--border)] rounded px-1 py-0.5 text-[8px] font-black uppercase tracking-widest cursor-pointer hover:border-rose-500/50 transition-all 
                                         <?= $item['status'] == 'Found' ? 'text-rose-500' : ($item['status'] == 'Lost' ? 'text-blue-500' : ($item['status'] == 'Claimed' ? 'text-indigo-500' : ($item['status'] == 'Disposed' ? 'text-amber-500' : 'text-emerald-500'))) ?>">
                                             <option value="Found" <?= $item['status'] == 'Found' ? 'selected' : '' ?>>Found
@@ -4432,24 +5180,27 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         <div
                                             class="staff-row-actions <?= $item['status'] === 'Delivered' ? 'is-delivered' : '' ?> flex items-center justify-end gap-1.5">
 
-                                            <form class="inline">
-                                                <button type="button" onclick="saveRow('<?= $item['tag_no'] ?>')"
-                                                    title="Save Record"
-                                                    class="w-6 h-6 flex items-center justify-center bg-rose-500 hover:bg-rose-600 text-white rounded-md hover:scale-105 transition-all shadow-sm shadow-rose-500/10">
-                                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5"
-                                                        viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                            d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V8l-4-4H8zm0 0v4h6V4M8 20v-6h8v6" />
-                                                    </svg>
-                                                </button>
-                                            </form>
+                                            <?php if ($can_edit_items): ?>
+                                                <form class="inline">
+                                                    <button type="button" onclick="saveRow('<?= $item['tag_no'] ?>')"
+                                                        title="Save Record"
+                                                        class="w-6 h-6 flex items-center justify-center bg-rose-500 hover:bg-rose-600 text-white rounded-md hover:scale-105 transition-all shadow-sm shadow-rose-500/10">
+                                                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5"
+                                                            viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V8l-4-4H8zm0 0v4h6V4M8 20v-6h8v6" />
+                                                        </svg>
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
 
                                             <?php if ($item['status'] !== 'Delivered'): ?>
                                                 <form method="POST"
-                                                    onsubmit="event.preventDefault(); const form=this; toast.confirm('Mark item <?= af_h($item['tag_no']) ?> as picked up and done?',()=>form.submit(),null,{title:'Confirm Pickup',confirmText:'Yes, Pick Up',intent:'success'});"
+                                                    onsubmit="event.preventDefault(); return confirmPickupWithStaffName(this, '<?= af_h($item['tag_no']) ?>');"
                                                     class="inline">
                                                     <input type="hidden" name="action" value="pickup_item">
                                                     <input type="hidden" name="tag_no" value="<?= $item['tag_no'] ?>">
+                                                    <input type="hidden" name="pickup_staff_name" value="">
                                                     <button type="submit" title="Picked Up"
                                                         class="w-6 h-6 flex items-center justify-center bg-emerald-600 hover:bg-emerald-700 text-white rounded-md hover:scale-105 transition-all shadow-sm shadow-emerald-600/10">
                                                         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor"
@@ -4461,20 +5212,22 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                 </form>
                                             <?php endif; ?>
 
-                                            <form method="POST"
-                                                onsubmit="event.preventDefault(); const form=this; toast.confirm('Are you sure you want to permanently delete item <?= af_h($item['tag_no']) ?>?',()=>form.submit(),null,{title:'Confirm Deletion',confirmText:'Yes, Delete',intent:'danger'});"
-                                                class="inline">
-                                                <input type="hidden" name="action" value="delete_item">
-                                                <input type="hidden" name="tag_no" value="<?= $item['tag_no'] ?>">
-                                                <button type="submit" title="Delete Record"
-                                                    class="w-6 h-6 flex items-center justify-center bg-red-600 hover:bg-red-700 text-white rounded-md hover:scale-105 transition-all shadow-sm shadow-red-600/10">
-                                                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor"
-                                                        stroke-width="2.5" viewBox="0 0 24 24">
-                                                        <path stroke-linecap="round" stroke-linejoin="round"
-                                                            d="M6 18L18 6M6 6l12 12" />
-                                                    </svg>
-                                                </button>
-                                            </form>
+                                            <?php if ($can_delete_items): ?>
+                                                <form method="POST"
+                                                    onsubmit="event.preventDefault(); const form=this; toast.confirm('Are you sure you want to permanently delete item <?= af_h($item['tag_no']) ?>?',()=>form.submit(),null,{title:'Confirm Deletion',confirmText:'Yes, Delete',intent:'danger'});"
+                                                    class="inline">
+                                                    <input type="hidden" name="action" value="delete_item">
+                                                    <input type="hidden" name="tag_no" value="<?= $item['tag_no'] ?>">
+                                                    <button type="submit" title="Delete Record"
+                                                        class="w-6 h-6 flex items-center justify-center bg-red-600 hover:bg-red-700 text-white rounded-md hover:scale-105 transition-all shadow-sm shadow-red-600/10">
+                                                        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor"
+                                                            stroke-width="2.5" viewBox="0 0 24 24">
+                                                            <path stroke-linecap="round" stroke-linejoin="round"
+                                                                d="M6 18L18 6M6 6l12 12" />
+                                                        </svg>
+                                                    </button>
+                                                </form>
+                                            <?php endif; ?>
 
                                         </div>
                                     </td>

@@ -19,7 +19,7 @@ DirectoryIndex index.php
     Require all denied
 </FilesMatch>
 
-<FilesMatch "^bootstrap\.php$">
+<FilesMatch "^(bootstrap|config\.local)\.php$">
     Require all denied
 </FilesMatch>
 
