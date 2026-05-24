@@ -3,46 +3,90 @@
 ## Application Components
 
 ```mermaid
-flowchart LR
-    Passenger["Passenger browser"] --> Index["index.php"]
-    Staff["Staff browser"] --> StaffUI["staff.php"]
-    Index --> API["api.php"]
-    StaffUI --> API
-    Index --> Bootstrap["bootstrap.php"]
+flowchart TD
+    subgraph Client ["Client Viewport"]
+        Passenger["Passenger browser"]
+        Staff["Staff browser"]
+    end
+
+    subgraph Security ["Security & Routing Gateways"]
+        Proxy["public_api.php (Public API Proxy)"]
+        Htaccess[".htaccess (Access Hardening)"]
+    end
+
+    subgraph Controllers ["Controllers & Logic"]
+        Index["index.php (Passenger Portal)"]
+        StaffUI["staff.php (Staff Dashboard)"]
+        API["api.php (Core REST API)"]
+        Mailer["mailer.php (Modular Mailer)"]
+    end
+
+    subgraph Core ["System Initialization"]
+        Bootstrap["bootstrap.php (Bootloader)"]
+        BackupLock["uploads/.last_backup_check"]
+    end
+
+    subgraph Storage ["Station SQLite Databases"]
+        SQLite["cabin_db_CODE.sqlite (Active DB)"]
+        BackupSQL["cabin_db_backup_CODE.sqlite (Local Backups)"]
+    end
+
+    %% Client Routing
+    Passenger --> Htaccess
+    Staff --> Htaccess
+    Htaccess --> Index
+    Htaccess --> StaffUI
+    
+    %% Request Delegation & Proxies
+    Index --> Proxy
+    Proxy -->|Defines Internal Call| API
+    StaffUI -->|Session Auth Checks| API
+    
+    %% Core Bootstrapping
+    Index --> Bootstrap
     StaffUI --> Bootstrap
     API --> Bootstrap
-    Bootstrap --> Settings["settings table"]
-    Bootstrap --> Items["items table"]
-    Bootstrap --> Pending["pending_reports table"]
-    Bootstrap --> Airlines["airlines table"]
-    Bootstrap --> SQLite["Station SQLite database"]
-    API --> Uploads["uploads/ runtime files"]
-    StaffUI --> Mail["SMTP or PHP mail"]
-    API --> Mail
+    
+    %% Storage & Automated Backups
+    Bootstrap --> SQLite
+    Bootstrap -->|Rate-Limited Lock-File Check| BackupLock
+    BackupLock -->|Auto Backup Trigger| BackupSQL
+    
+    %% Mail Operations
+    API --> Mailer
+    StaffUI --> Mailer
 ```
 
-## Request Flow
+## Request Flow & Security Boundaries
 
 ```mermaid
 sequenceDiagram
     participant P as Passenger
     participant UI as index.php
+    participant Proxy as public_api.php
     participant API as api.php
     participant Boot as bootstrap.php
-    participant DB as SQLite
-    participant Mail as Mail transport
+    participant Lock as Backup Check Lock
+    participant DB as SQLite (cabin_db_CODE.sqlite)
 
     P->>UI: Search found items or submit lost report
-    UI->>API: JSON or form action
-    API->>Boot: Resolve station and database
-    Boot->>DB: Provision schema if needed
+    UI->>Proxy: JSON POST / AJAX Action with CSRF token
+    Proxy->>Proxy: Validate Same-Site CSRF & Allowed Actions
+    Proxy->>API: Safe delegate execution (defines AF_INTERNAL_API_CALL)
+    API->>Boot: Resolve active station from session/cookie/headers
+    Boot->>Lock: Check lock file time (rate-limited check once per hour)
+    alt Lock age > 3600s or first check
+        Boot->>DB: Perform station-isolated copy to cabin_db_backup_CODE.sqlite
+        Boot->>DB: Save last_backup_time in settings table
+    end
+    Boot->>DB: Provision schema if missing
     API->>DB: Read or write item/report records
-    API->>Mail: Send configured notification when needed
-    API-->>UI: JSON response
-    UI-->>P: Updated terminal view
+    API-->>Proxy: JSON Response
+    Proxy-->>UI: Sanitized JSON payload
+    UI-->>P: Updated viewport view
 ```
 
-## Station Resolution
+## Station Resolution Flow
 
 ```mermaid
 flowchart TD
@@ -72,7 +116,7 @@ erDiagram
     }
 
     items {
-        text tag_no
+        text tag_no PK
         text item_description
         text contents
         text pax_name
@@ -112,9 +156,12 @@ erDiagram
     }
 ```
 
-## Runtime Files
+## Runtime Files & Storage Layout
 
-- `cabin_db.sqlite` and `cabin_db_CODE.sqlite` are generated locally and ignored by Git.
-- `uploads/` stores runtime uploads and local email copies.
-- `release/` stores generated release builds and is ignored by Git.
-- `uploads/.htaccess` is tracked because it blocks script execution inside uploads.
+- `cabin_db.sqlite` / `cabin_db_CODE.sqlite`: Active station database files (ignored by Git).
+- `cabin_db_backup_CODE.sqlite`: Station-specific automated backup files, created via async background runners (ignored by Git).
+- `uploads/`: Stores runtime attachments, image media, and local debug email copies.
+- `uploads/.last_backup_check`: Lock-file to control the I/O rate-limiting of background backup checking (ensures runs occur at most once per hour).
+- `release/`: Target directory for generated and compiled production releases (ignored by Git).
+- `uploads/.htaccess`: Security constraint file blocking code execution inside uploads directories.
+
