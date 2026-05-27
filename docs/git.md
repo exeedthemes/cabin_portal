@@ -8,6 +8,29 @@ This guide outlines the Git workflow, repository hygiene, and the GitHub-integra
 
 To maintain absolute codebase stability, team members must adhere to the following workflow:
 
+```mermaid
+flowchart TD
+    subgraph Git ["1. Git Contribution Lifecycle"]
+        M1["main branch"] -->|"git checkout -b feat/branch"| B1["feat/branch (Isolated Feature Dev)"]
+        B1 -->|"Local Checks (php -l)"| B2["Local Staging & Validation"]
+        B2 -->|"git commit & git push"| PR["Pull Request (GitHub)"]
+        PR -->|"GitHub Actions (ci.yml)"| CI["CI Syntax & Build Validation"]
+        CI -->|"Peer Review & Security Audit"| Approve["PR Approved"]
+        Approve -->|"git merge to main"| M2["main branch (Stable)"]
+        M2 -->|"Semantic Version Tag (e.g. v1.7.0)"| Release["Deployable Release Build"]
+    end
+    
+    style Git fill:#090d16,stroke:#1e293b,stroke-width:2px,color:#cbd5e1
+    style M1 fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#38bdf8
+    style B1 fill:#0f172a,stroke:#64748b,stroke-width:1px,color:#94a3b8
+    style B2 fill:#0f172a,stroke:#64748b,stroke-width:1px,color:#94a3b8
+    style PR fill:#1e1b4b,stroke:#818cf8,stroke-width:1px,color:#a5b4fc
+    style CI fill:#064e3b,stroke:#34d399,stroke-width:1px,color:#a7f3d0
+    style Approve fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#bbf7d0
+    style M2 fill:#1e293b,stroke:#38bdf8,stroke-width:2px,color:#38bdf8
+    style Release fill:#311042,stroke:#f472b6,stroke-width:2px,color:#fbcfe8
+```
+
 1. **Branching**: Always create a short-lived feature or bugfix branch from the latest `main` branch.
    ```bash
    git checkout main
@@ -42,6 +65,55 @@ Before using `git commit`, run `git status` to verify that no ignored assets, SQ
 ## 3. Automated Git-Based Deployment (`deploy.php`)
 
 AeroFind features an **Automated Secure PHP Deployer** that pulls updates directly from the GitHub repository, bypassing FTP/SSH configurations.
+
+```mermaid
+flowchart TD
+    subgraph DeployFlow ["2. Automated Git-Based Deployment (deploy.php)"]
+        Trigger["Admin Dashboard update trigger"] -->|"Gated HTTP GET Request with token"| Auth{"Valid DEPLOY_TOKEN?"}
+        
+        Auth -->|No| R403["403 Forbidden Response"]
+        Auth -->|Yes| SimulateCheck{"Is Simulation Mode active?"}
+        
+        SimulateCheck -->|Yes| SimRun["Dry-Run Output Terminal: Log download, extract, analyze and simulate updates"]
+        SimulateCheck -->|No| FetchZIP["Fetch branch archive from GitHub API"]
+        
+        FetchZIP --> RepoGating{"Is repository private?"}
+        RepoGating -->|Yes| PAT["Attach Authorization: Bearer GITHUB_PAT header"]
+        RepoGating -->|No| Public["Standard URL fetch"]
+        
+        PAT --> DL["Download & Save temp_deploy.zip"]
+        Public --> DL
+        
+        DL --> ValidateZIP{"Valid ZIP archive magic bytes 'PK'?"}
+        ValidateZIP -->|No| CorruptErr["Error: Invalid or corrupt zip file"]
+        ValidateZIP -->|Yes| Extract["Extract to temp_extract/ using ZipArchive or system unzip"]
+        
+        Extract --> CopyFiles["Copy files to live folder"]
+        CopyFiles --> SkipConfig{"Skip/Retain db_config.php & config.local.php"}
+        
+        SkipConfig --> Cleanup["Delete temp_deploy.zip and temp_extract/"]
+        Cleanup --> Success["Update complete! Site is live and secure"]
+    end
+
+    style DeployFlow fill:#090d16,stroke:#1e293b,stroke-width:2px,color:#cbd5e1
+    style Trigger fill:#0f172a,stroke:#38bdf8,stroke-width:1px,color:#38bdf8
+    style Auth fill:#312e81,stroke:#818cf8,stroke-width:1px,color:#a5b4fc
+    style SimulateCheck fill:#312e81,stroke:#818cf8,stroke-width:1px,color:#a5b4fc
+    style FetchZIP fill:#1e1b4b,stroke:#818cf8,stroke-width:1px,color:#c7d2fe
+    style SimRun fill:#581c87,stroke:#c084fc,stroke-width:1px,color:#e9d5ff
+    style RepoGating fill:#312e81,stroke:#818cf8,stroke-width:1px,color:#a5b4fc
+    style PAT fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#cbd5e1
+    style Public fill:#1e293b,stroke:#64748b,stroke-width:1px,color:#cbd5e1
+    style DL fill:#111827,stroke:#4b5563,stroke-width:1px,color:#d1d5db
+    style ValidateZIP fill:#312e81,stroke:#818cf8,stroke-width:1px,color:#a5b4fc
+    style CorruptErr fill:#7f1d1d,stroke:#f87171,stroke-width:2px,color:#fee2e2
+    style Extract fill:#0f172a,stroke:#4b5563,stroke-width:1px,color:#cbd5e1
+    style CopyFiles fill:#064e3b,stroke:#34d399,stroke-width:1px,color:#a7f3d0
+    style SkipConfig fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#bbf7d0
+    style Cleanup fill:#111827,stroke:#4b5563,stroke-width:1px,color:#9ca3af
+    style Success fill:#14532d,stroke:#4ade80,stroke-width:2px,color:#bbf7d0
+    style R403 fill:#7f1d1d,stroke:#f87171,stroke-width:2px,color:#fee2e2
+```
 
 ### How it Works
 1. **GitHub Release Hooks / Dashboard Trigger**: The deployment script (`deploy.php`) is fetched securely when triggered from the Staff Dashboard's Platform Update pane.
