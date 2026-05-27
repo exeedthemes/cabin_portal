@@ -77,8 +77,6 @@ php build_release.php
 - [Deployment Checklist](deployment-checklist.md)
 - [Git Workflow & Automated Deployment](git.md)
 - [Release Notes](RELEASE_NOTES.md)
-- [Contributing Guidelines](CONTRIBUTING.md)
-- [Security Policy](SECURITY.md)
 
 ## License
 
