@@ -376,17 +376,24 @@ function af_mail_flight_display(PDO $pdo, string $flight_info): string
             continue;
         }
 
-        if (stripos($flight_info, $name) === 0) {
-            return $flight_info;
+        // Pattern 1: Look for airline name in the input, followed by optional code and flight number
+        $name_pattern = '/\b' . preg_quote($name, '/') . '[- ]*(?:' . preg_quote($code, '/') . '[- ]*)?(\d{1,4}[a-z]?)\b/i';
+        if (preg_match($name_pattern, $flight_info, $matches)) {
+            return trim($name . ' ' . $code . '-' . $matches[1]);
         }
 
-        if (preg_match('/^' . preg_quote($code, '/') . '\b\s*(.*)$/i', $flight_info, $matches)) {
-            $remaining = trim((string) ($matches[1] ?? ''));
-            return trim($name . ($remaining !== '' ? ' ' . $remaining : ''));
+        // Pattern 2: Look for airline code in the input, followed by flight number
+        $code_pattern = '/\b' . preg_quote($code, '/') . '[- ]*(\d{1,4}[a-z]?)\b/i';
+        if (preg_match($code_pattern, $flight_info, $matches)) {
+            return trim($name . ' ' . $code . '-' . $matches[1]);
         }
 
-        if (preg_match('/^' . preg_quote($code, '/') . '(?=\d)/i', $flight_info)) {
-            return trim($name . ' ' . $flight_info);
+        // Pattern 3: Look for the airline name alone
+        if (stripos($flight_info, $name) !== false) {
+            $remaining = trim(str_ireplace($name, '', $flight_info));
+            if (preg_match('/\b(?:' . preg_quote($code, '/') . '[- ]*)?(\d{1,4}[a-z]?)\b/i', $remaining, $matches)) {
+                return trim($name . ' ' . $code . '-' . $matches[1]);
+            }
         }
     }
 
@@ -493,6 +500,30 @@ function af_claim_staff_email(array $settings, array $details): array
             ['label' => 'Item description', 'value' => $details['item_description'] ?? '']
         ],
         'footer' => "This is an automated system notification from $company_short_name Cabin Portal."
+    ]));
+}
+
+function af_claim_approved_pickup_email(array $settings, array $details): array
+{
+    $company_name = $settings['company_name'] ?? 'AeroFind Cabin Recovery';
+    $tag = (string) ($details['tag'] ?? '');
+    return af_email_package("$company_name - Claim Approved for Pickup [$tag]", af_render_email($settings, [
+        'title' => 'Claim approved for pickup',
+        'preheader' => "Your claim for item $tag has been approved for pickup.",
+        'eyebrow' => 'Pickup approved',
+        'paragraphs' => [
+            'Dear ' . (($details['pax_name'] ?? '') ?: 'Passenger') . ',',
+            'Staff reviewed your claim request and approved the item for collection.',
+            'Please bring a valid ID and the reference code below when collecting the item.'
+        ],
+        'rows' => [
+            ['label' => 'Reference', 'value' => $tag, 'highlight' => true],
+            ['label' => 'Item', 'value' => $details['item_description'] ?? ''],
+            ['label' => 'Flight/details', 'value' => $details['flight_details'] ?? ''],
+            ['label' => 'Station', 'value' => $details['station'] ?? '']
+        ],
+        'note_title' => 'Collection location',
+        'note' => $details['collection_location'] ?? ''
     ]));
 }
 
@@ -620,6 +651,30 @@ function af_pickup_completed_email(array $settings, array $details): array
         ],
         'note_title' => 'Thank you',
         'note' => "Thank you for using $company_name."
+    ]));
+}
+
+function af_pickup_otp_email(array $settings, array $details): array
+{
+    $company_name = $settings['company_name'] ?? 'AeroFind Cabin Recovery';
+    $tag = (string) ($details['tag'] ?? '');
+    $code = (string) ($details['code'] ?? '');
+    return af_email_package("$company_name - Pickup OTP for [$tag]", af_render_email($settings, [
+        'title' => 'Pickup confirmation code',
+        'preheader' => "Your pickup confirmation code for item $tag.",
+        'eyebrow' => 'Pickup security',
+        'paragraphs' => [
+            'Use this one-time code to confirm the item pickup in the staff portal.',
+            'This code expires in 10 minutes. If you did not request it, ignore this email.'
+        ],
+        'rows' => [
+            ['label' => 'Reference', 'value' => $tag, 'highlight' => true],
+            ['label' => 'Code', 'value' => $code, 'highlight' => true],
+            ['label' => 'Staff name', 'value' => $details['staff_name'] ?? ''],
+            ['label' => 'Staff email', 'value' => $details['staff_email'] ?? '']
+        ],
+        'note_title' => 'Security note',
+        'note' => 'Only enter this code on the staff pickup confirmation screen.'
     ]));
 }
 

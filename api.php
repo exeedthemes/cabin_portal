@@ -35,16 +35,25 @@ function next_item_tag(PDO $pdo)
             UNION ALL
             SELECT tag_no FROM pending_reports WHERE tag_no GLOB 'ID-[0-9]*'
         )
-        ORDER BY CAST(substr(tag_no, 4) AS INTEGER) DESC
-        LIMIT 1
+        ORDER BY CAST(substr(tag_no, 4) AS INTEGER) ASC
     ");
-    $last_tag = $stmt->fetchColumn();
-    if (!$last_tag || !preg_match('/^ID-(\d+)/i', $last_tag, $matches)) {
-        return 'ID-0001';
+    $occupied = [];
+    $width = 4;
+    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $tag_no) {
+        if (preg_match('/^ID-(\d+)/i', (string) $tag_no, $matches)) {
+            $number = (int) $matches[1];
+            if ($number > 0) {
+                $occupied[$number] = true;
+                $width = max($width, strlen($matches[1]));
+            }
+        }
     }
 
-    $width = strlen($matches[1]);
-    $next_num = ((int) $matches[1]) + 1;
+    $next_num = 1;
+    while (isset($occupied[$next_num])) {
+        $next_num++;
+    }
+
     return 'ID-' . str_pad((string) $next_num, max(4, $width), '0', STR_PAD_LEFT);
 }
 
@@ -472,10 +481,31 @@ try {
             exit;
         }
 
-        $updated_internal_note = append_unique_note($item['user_comments'] ?? '', 'Passenger claim request submitted');
+        $claim_note_parts = [
+            'Claim submitted ' . date('Y-m-d H:i'),
+            'Passenger: ' . $pax_name,
+            'Email: ' . $pax_email
+        ];
+        if ($pax_contact !== '') {
+            $claim_note_parts[] = 'Phone: ' . $pax_contact;
+        }
+        if ($seat_info !== '') {
+            $claim_note_parts[] = 'Seat/flight: ' . $seat_info;
+        }
+        $updated_internal_note = append_unique_note($item['user_comments'] ?? '', implode(' | ', $claim_note_parts));
+        $updated_seat_info = $seat_info !== '' ? $seat_info : ($item['comments'] ?? '');
 
-        $update_stmt = $pdo->prepare("UPDATE items SET user_comments = ? WHERE tag_no = ?");
-        $update_stmt->execute([$updated_internal_note, $tag]);
+        $update_stmt = $pdo->prepare("
+            UPDATE items
+            SET status = 'Claimed',
+                pax_name = ?,
+                pax_email = ?,
+                pax_contact_no = ?,
+                comments = ?,
+                user_comments = ?
+            WHERE tag_no = ?
+        ");
+        $update_stmt->execute([$pax_name, $pax_email, $pax_contact, $updated_seat_info, $updated_internal_note, $tag]);
 
         // Get station-specific mail and pickup settings.
         $settings = af_settings($pdo);

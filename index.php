@@ -116,12 +116,29 @@ $active_station = af_get_current_station();
             transition: transform 0.4s cubic-bezier(0.16, 1, 0.3, 1);
         }
 
+        .dark .airline-card .logo-container {
+            background: #ffffff !important;
+            border-color: rgba(255, 255, 255, 0.18);
+        }
+
         .airline-card:hover .logo-container {
             transform: scale(1.1);
         }
 
         .airline-card:hover h3 {
             color: var(--brand-color, var(--accent)) !important;
+        }
+
+        .dark .airline-card:hover h3 {
+            color: var(--brand-text-color, var(--brand-color, var(--accent))) !important;
+        }
+
+        .airline-count-label {
+            color: var(--brand-color);
+        }
+
+        .dark .airline-count-label {
+            color: var(--brand-text-color);
         }
 
         @keyframes cardIn {
@@ -549,7 +566,7 @@ $active_station = af_get_current_station();
             <div class="flex items-center gap-2 md:gap-4">
                 <!-- Station Switcher Dropdown -->
                 <div class="relative inline-block text-left" id="station-switcher-container">
-                    <button onclick="toggleStationMenu()"
+                    <button <?= $passenger_has_station ? 'type="button" disabled' : 'onclick="toggleStationMenu()"' ?>
                         class="w-9 h-9 md:w-auto md:h-10 px-0 md:px-4 flex items-center justify-center gap-1.5 rounded-xl bg-[var(--input)] border border-[var(--border)] text-[10px] font-black uppercase tracking-widest text-[var(--text)] hover:scale-105 transition-all">
                         <svg class="w-4 h-4 text-[var(--secondary)]" fill="none" stroke="currentColor" stroke-width="2"
                             viewBox="0 0 24 24">
@@ -560,25 +577,26 @@ $active_station = af_get_current_station();
                         </svg>
                         <span id="current-station-label"
                             class="hidden md:inline"><?= $passenger_has_station ? af_h($active_station) : 'Station' ?></span> <span
-                            class="text-[8px] opacity-60 hidden md:inline">▼</span>
+                            class="text-[8px] opacity-60 hidden md:inline"><?= $passenger_has_station ? '✓' : '▼' ?></span>
                     </button>
-                    <div id="station-dropdown"
-                        class="absolute right-0 mt-2 w-56 rounded-xl glass border border-[var(--border)] shadow-2xl hidden z-[100] overflow-hidden">
-                        <div class="p-2 border-b border-[var(--border)] bg-slate-900/10">
-                            <span
-                                class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] block px-2.5 py-1">Terminal
-                                Station</span>
+                    <?php if (!$passenger_has_station): ?>
+                        <div id="station-dropdown"
+                            class="absolute right-0 mt-2 w-56 rounded-xl glass border border-[var(--border)] shadow-2xl hidden z-[100] overflow-hidden">
+                            <div class="p-2 border-b border-[var(--border)] bg-slate-900/10">
+                                <span
+                                    class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] block px-2.5 py-1">Terminal
+                                    Station</span>
+                            </div>
+                            <div class="py-1 max-h-60 overflow-y-auto custom-scroll">
+                                <?php foreach (af_stations() as $code => $name): ?>
+                                    <a href="?station=<?= rawurlencode($code) ?>"
+                                        class="flex items-center justify-between px-3.5 py-2.5 text-[9px] uppercase font-black tracking-widest text-[var(--text)] hover:bg-rose-500/10 hover:text-rose-500 transition-colors">
+                                        <span class="truncate"><?= af_h($code) ?> - <?= af_h($name) ?></span>
+                                    </a>
+                                <?php endforeach; ?>
+                            </div>
                         </div>
-                        <div class="py-1 max-h-60 overflow-y-auto custom-scroll">
-                            <?php foreach (af_stations() as $code => $name): ?>
-                                <a href="?station=<?= rawurlencode($code) ?>"
-                                    class="flex items-center justify-between px-3.5 py-2.5 text-[9px] uppercase font-black tracking-widest text-[var(--text)] hover:bg-rose-500/10 hover:text-rose-500 transition-colors <?= $passenger_has_station && $active_station === $code ? 'text-rose-500 font-extrabold' : '' ?>">
-                                    <span class="truncate"><?= af_h($code) ?> - <?= af_h($name) ?></span>
-                                    <?php if ($passenger_has_station && $active_station === $code): ?><span>✓</span><?php endif; ?>
-                                </a>
-                            <?php endforeach; ?>
-                        </div>
-                    </div>
+                    <?php endif; ?>
                 </div>
 
                 <button onclick="toggleTheme()"
@@ -621,19 +639,31 @@ $active_station = af_get_current_station();
     <main class="flex-grow overflow-hidden relative">
         <?php if (!$passenger_has_station): ?>
             <div id="station-select-view"
-                class="view-transition absolute inset-0 p-4 md:p-8 overflow-y-auto custom-scroll flex items-center justify-center">
-                <div class="w-full max-w-3xl">
-                    <div class="mb-6 text-center">
+                class="view-transition absolute inset-0 p-4 md:p-8 overflow-y-auto custom-scroll flex items-start sm:items-center justify-center py-10 sm:py-6">
+                <div class="w-full max-w-3xl my-auto">
+                    <div class="mb-8 text-center">
+                        <div class="w-14 h-14 rounded-2xl bg-gradient-to-tr from-rose-500/20 to-rose-600/5 border border-rose-500/20 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-rose-500/5">
+                            <svg class="w-7 h-7 text-rose-500" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                            </svg>
+                        </div>
                         <p class="text-[10px] font-black uppercase tracking-[0.25em] text-rose-500 mb-2">Passenger Terminal</p>
                         <h2 class="text-2xl md:text-4xl font-black uppercase tracking-tighter text-[var(--text)]">Select Your Station</h2>
-                        <p class="mt-2 text-xs md:text-sm font-bold text-[var(--secondary)]">Choose the airport station before viewing airline found items.</p>
+                        <p class="mt-2 text-xs md:text-sm font-bold text-[var(--secondary)] px-4">Choose the airport station before viewing airline found items.</p>
                     </div>
-                    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    <div class="grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 gap-3 md:gap-4 max-w-2xl mx-auto">
                         <?php foreach (af_stations() as $code => $name): ?>
                             <a href="?station=<?= rawurlencode($code) ?>"
-                                class="group rounded-2xl border border-[var(--border)] bg-[var(--card)] p-5 transition-all hover:-translate-y-1 hover:border-rose-500/40 hover:shadow-2xl hover:shadow-rose-500/10">
-                                <span class="block text-2xl font-black uppercase tracking-tight text-[var(--text)] group-hover:text-rose-500"><?= af_h($code) ?></span>
-                                <span class="mt-1 block text-xs font-black uppercase tracking-widest text-[var(--secondary)]"><?= af_h($name) ?></span>
+                                class="group relative rounded-2xl border border-[var(--border)] bg-[var(--card)] p-4 md:p-5 transition-all duration-300 hover:-translate-y-1 hover:border-rose-500/40 hover:shadow-2xl hover:shadow-rose-500/10 flex flex-col justify-between min-h-[105px] md:min-h-[120px] overflow-hidden">
+                                <div class="absolute top-4 right-4 w-7 h-7 rounded-full bg-[var(--input)] border border-[var(--border)] flex items-center justify-center group-hover:bg-rose-500/10 group-hover:border-rose-500/30 transition-all duration-300">
+                                    <svg class="w-3.5 h-3.5 text-[var(--secondary)] group-hover:text-rose-500 transition-colors" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M15 10.5a3 3 0 11-6 0 3 3 0 016 0z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10.5c0 7.142-7.5 11.25-7.5 11.25S4.5 17.642 4.5 10.5a7.5 7.5 0 1115 0z" />
+                                    </svg>
+                                </div>
+                                <span class="block text-2xl md:text-3xl font-black uppercase tracking-tight text-[var(--text)] group-hover:text-rose-500 transition-colors mt-auto"><?= af_h($code) ?></span>
+                                <span class="mt-1 block text-[9px] xs:text-xs font-black uppercase tracking-widest text-[var(--secondary)] truncate pr-6"><?= af_h($name) ?></span>
                             </a>
                         <?php endforeach; ?>
                     </div>
@@ -850,6 +880,8 @@ $active_station = af_get_current_station();
         </div>
         <div class="flex items-center gap-2">
             <a href="privacy.php" class="hidden sm:inline hover:text-rose-500 transition-colors">Privacy Notice</a>
+            <span class="opacity-20 hidden sm:inline">|</span>
+            <a href="impressum.php" class="hidden sm:inline hover:text-rose-500 transition-colors">Impressum</a>
             <span class="opacity-20 hidden sm:inline">|</span>
             <?php if ($developer_contact_email !== ''): ?>
                 <a href="mailto:<?= af_h($developer_contact_email) ?>"
@@ -1161,6 +1193,17 @@ $active_station = af_get_current_station();
                 'klm': { hex: '#00A1DE', rgb: '0, 161, 222' }
             };
 
+            const readableBrandText = (hex) => {
+                const match = /^#?([0-9a-f]{6})$/i.exec(hex);
+                if (!match) return hex;
+                const value = match[1];
+                const r = parseInt(value.slice(0, 2), 16);
+                const g = parseInt(value.slice(2, 4), 16);
+                const b = parseInt(value.slice(4, 6), 16);
+                const luminance = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+                return luminance < 0.42 ? '#cbd5e1' : hex;
+            };
+
             Object.keys(allData).sort().forEach(airlineName => {
                 const group = allData[airlineName];
                 const airlineDisplayName = escapeHtml(group.airline.name || airlineName);
@@ -1177,15 +1220,16 @@ $active_station = af_get_current_station();
                 const brand = brandColors[nameLower] || { hex: '#f43f5e', rgb: '244, 63, 94' };
                 card.style.setProperty('--brand-color', brand.hex);
                 card.style.setProperty('--brand-color-rgb', brand.rgb);
+                card.style.setProperty('--brand-text-color', readableBrandText(brand.hex));
 
                 card.innerHTML = `
-                    <div class="logo-container w-11 h-11 md:w-14 md:h-14 bg-[var(--bg)] rounded-2xl flex items-center justify-center p-2.5 border border-[var(--border)] shadow-sm relative z-10">
+                    <div class="logo-container w-11 h-11 md:w-14 md:h-14 bg-white rounded-2xl flex items-center justify-center p-2.5 border border-[var(--border)] shadow-sm relative z-10">
                         <img src="${logoUrl || fallbackLogo}" class="w-full h-full object-contain filter" loading="lazy" decoding="async" data-smooth-image onerror="this.src='${fallbackLogo}'">
                     </div>
                     <div class="text-center z-10">
                         <h3 class="font-black uppercase text-[8px] md:text-[9px] tracking-widest text-[var(--text)] transition-colors line-clamp-1">${airlineDisplayName}</h3>
                         <div class="mt-1.5 inline-block px-2 py-0.5 rounded-full" style="background-color: rgba(var(--brand-color-rgb), 0.12);">
-                            <p class="text-[7px] font-black uppercase tracking-tighter" style="color: var(--brand-color);">${group.items.length} Found${airlineCode ? ` · ${airlineCode}` : ''}</p>
+                            <p class="airline-count-label text-[7px] font-black uppercase tracking-tighter">${group.items.length} Found${airlineCode ? ` · ${airlineCode}` : ''}</p>
                         </div>
                     </div>
                 `;

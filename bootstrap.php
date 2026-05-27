@@ -1,5 +1,126 @@
 <?php
 
+define('AEROFIND_VERSION', '1.7.0');
+
+/**
+ * Gets the deploy token from deploy.php dynamically.
+ */
+function af_get_deploy_token(): string {
+    $deploy_file = __DIR__ . '/deploy.php';
+    if (file_exists($deploy_file)) {
+        $content = file_get_contents($deploy_file);
+        if (preg_match("/define\s*\(\s*['\"]DEPLOY_TOKEN['\"]\s*,\s*['\"](.*?)['\"]\s*\)/", $content, $matches)) {
+            return $matches[1];
+        }
+    }
+    return 'aerofind_secure_deploy_2026'; // Fallback to default
+}
+
+/**
+ * Checks GitHub for the latest release version.
+ * Caches results in session to prevent rate limits.
+ */
+function af_check_for_updates(bool $force = false): array {
+    $current_version = AEROFIND_VERSION;
+    $now = time();
+    
+    // Support simulation for testing and demo purposes
+    $simulate = isset($_GET['simulate_update']) || (isset($_SESSION['simulate_update']) && $_SESSION['simulate_update']);
+    if (isset($_GET['simulate_update'])) {
+        $_SESSION['simulate_update'] = ($_GET['simulate_update'] === '1');
+    }
+    
+    if (!$force && !$simulate && !empty($_SESSION['af_update_info']) && !empty($_SESSION['af_update_info_time'])) {
+        if ($now - $_SESSION['af_update_info_time'] < 3600) {
+            return $_SESSION['af_update_info'];
+        }
+    }
+    
+    $repo = 'exeedthemes/aerofind';
+    
+    if ($simulate) {
+        $result = [
+            'success' => true,
+            'current_version' => $current_version,
+            'latest_version' => '1.8.0',
+            'update_available' => true,
+            'release_notes' => "### 🚀 AeroFind Enterprise v1.8.0\n\n- **Live Deployment Progress**: Visual real-time terminal output with terminal-styled progress counters.\n- **Improved Update Engine**: Smoother package updates and improved folder permission checks.\n- **Optimized Security Shield**: Nonce-based CSP updates and strict same-site proxy validation.",
+            'html_url' => "https://github.com/{$repo}",
+            'published_at' => date('Y-m-d H:i:s'),
+            'checked_at' => date('Y-m-d H:i:s'),
+            'simulated' => true
+        ];
+        $_SESSION['af_update_info'] = $result;
+        $_SESSION['af_update_info_time'] = $now;
+        return $result;
+    }
+    
+    $url = "https://api.github.com/repos/{$repo}/releases/latest";
+    
+    $ch = curl_init();
+    curl_setopt($ch, CURLOPT_URL, $url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_USERAGENT, 'AeroFindUpdater');
+    curl_setopt($ch, CURLOPT_TIMEOUT, 6);
+    
+    // Add token header if configured in deploy.php
+    $deploy_file = __DIR__ . '/deploy.php';
+    if (file_exists($deploy_file)) {
+        $content = file_get_contents($deploy_file);
+        if (preg_match("/define\s*\(\s*['\"]GITHUB_PAT['\"]\s*,\s*['\"](.*?)['\"]\s*\)/", $content, $matches)) {
+            $pat = trim($matches[1]);
+            if ($pat !== '') {
+                curl_setopt($ch, CURLOPT_HTTPHEADER, [
+                    "Authorization: Bearer " . $pat,
+                    "Accept: application/vnd.github+json"
+                ]);
+            }
+        }
+    }
+    
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+    
+    $result = [
+        'success' => false,
+        'current_version' => $current_version,
+        'latest_version' => $current_version,
+        'update_available' => false,
+        'release_notes' => '',
+        'html_url' => "https://github.com/{$repo}",
+        'published_at' => '',
+        'checked_at' => date('Y-m-d H:i:s'),
+        'error' => ''
+    ];
+    
+    if ($http_code === 200 && !empty($response)) {
+        $data = json_decode($response, true);
+        if (json_last_error() === JSON_ERROR_NONE && !empty($data['tag_name'])) {
+            $latest_version = ltrim($data['tag_name'], 'v');
+            $result['success'] = true;
+            $result['latest_version'] = $latest_version;
+            $result['release_notes'] = $data['body'] ?? '';
+            $result['html_url'] = $data['html_url'] ?? "https://github.com/{$repo}";
+            $result['published_at'] = !empty($data['published_at']) ? date('Y-m-d H:i:s', strtotime($data['published_at'])) : '';
+            
+            if (version_compare($latest_version, $current_version, '>')) {
+                $result['update_available'] = true;
+            }
+        } else {
+            $result['error'] = 'Invalid response from GitHub API.';
+        }
+    } else {
+        $result['error'] = "GitHub API returned HTTP code {$http_code}. Configure a GITHUB_PAT in deploy.php or append ?simulate_update=1 to simulate updates.";
+    }
+    
+    $_SESSION['af_update_info'] = $result;
+    $_SESSION['af_update_info_time'] = $now;
+    
+    return $result;
+}
+
 function af_get_current_station(): string {
     static $resolved_station = null;
     if ($resolved_station !== null) {
@@ -12,6 +133,26 @@ function af_get_current_station(): string {
     if (in_array(($_SESSION['cabin_staff_role'] ?? ''), ['staff', 'supervisor'], true) && !empty($_SESSION['active_station'])) {
         $station = strtoupper(trim((string) $_SESSION['active_station']));
         if (preg_match('/^[A-Z0-9]{3,4}$/', $station)) {
+            $resolved_station = $station;
+            return $resolved_station;
+        }
+    }
+
+    $is_admin = (($_SESSION['cabin_staff_role'] ?? '') === 'admin');
+
+    // Public users are locked to their first selected station for this browser session.
+    if (!$is_admin && !empty($_SESSION['active_station'])) {
+        $station = strtoupper(trim((string) $_SESSION['active_station']));
+        if (array_key_exists($station, af_stations())) {
+            $resolved_station = $station;
+            return $resolved_station;
+        }
+    }
+
+    if (!$is_admin && !empty($_COOKIE['af_station'])) {
+        $station = strtoupper(trim($_COOKIE['af_station']));
+        if (preg_match('/^[A-Z0-9]{3,4}$/', $station) && array_key_exists($station, af_stations())) {
+            $_SESSION['active_station'] = $station;
             $resolved_station = $station;
             return $resolved_station;
         }
@@ -134,6 +275,26 @@ function af_db(): PDO {
         $pdo->exec("CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS deleted_items (tag_no TEXT PRIMARY KEY)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS deleted_airlines (code TEXT PRIMARY KEY)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            entity_type TEXT,
+            entity_id TEXT,
+            actor TEXT,
+            details TEXT,
+            created_at DATETIME
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_audit_log_entity ON audit_log (entity_type, entity_id, created_at)");
+        $pdo->exec("CREATE TABLE IF NOT EXISTS pickup_staff_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            staff_name TEXT NOT NULL,
+            staff_email TEXT NOT NULL,
+            normalized_name TEXT NOT NULL UNIQUE,
+            normalized_email TEXT NOT NULL UNIQUE,
+            first_seen_at DATETIME,
+            last_seen_at DATETIME
+        )");
+        $pdo->exec("CREATE INDEX IF NOT EXISTS idx_pickup_staff_profiles_email ON pickup_staff_profiles (normalized_email)");
         $pdo->exec("CREATE TABLE IF NOT EXISTS items (
             tag_no TEXT,
             item_description TEXT,
@@ -192,18 +353,6 @@ function af_db(): PDO {
 
         // Automatically seed some initial airlines for new stations so they have immediate data
         if ($is_new_db) {
-            $default_airlines = [
-                ['AeroFind Cabin', 'AF', 'https://ui-avatars.com/api/?name=AF&background=f43f5e&color=fff', 'aerofind.online'],
-                ['Lufthansa', 'LH', 'https://logo.clearbit.com/lufthansa.com', 'lufthansa.com'],
-                ['British Airways', 'BA', 'https://logo.clearbit.com/britishairways.com', 'britishairways.com'],
-                ['Emirates', 'EK', 'https://logo.clearbit.com/emirates.com', 'emirates.com'],
-                ['Delta Air Lines', 'DL', 'https://logo.clearbit.com/delta.com', 'delta.com']
-            ];
-            $stmt = $pdo->prepare("INSERT OR IGNORE INTO airlines (name, code, logo, domain) VALUES (?, ?, ?, ?)");
-            foreach ($default_airlines as $al) {
-                $stmt->execute($al);
-            }
-
             // Clone settings from MUC (primary) if it exists, ensuring smooth configuration inheritance
             $master_db_file = __DIR__ . '/cabin_db.sqlite';
             if ($safe_station !== 'MUC' && file_exists($master_db_file)) {
@@ -319,11 +468,27 @@ function af_settings(PDO $pdo): array {
         'company_initials' => 'AF',
         'company_logo' => '',
         'favicon_url' => '',
+        'legal_company_name' => '',
+        'legal_form' => '',
+        'legal_representative' => '',
+        'legal_street_address' => '',
+        'legal_postal_city' => '',
+        'legal_country' => 'Germany',
+        'legal_email' => '',
+        'legal_phone' => '',
+        'legal_register' => '',
+        'legal_vat_id' => '',
+        'privacy_contact_email' => '',
+        'data_role_description' => 'We process cabin lost-and-found data as a ground handling service provider on behalf of the responsible airline, unless a separate agreement states otherwise.',
+        'active_record_retention_days' => '180',
+        'closed_record_retention_days' => '365',
+        'sensitive_photo_retention_days' => '30',
         'company_accent' => '#f43f5e',
         'passenger_view_days' => '30',
         'items_per_page' => '20',
         'passenger_card_layout' => 'dual',
         'pickup_info' => 'Main Terminal, Cabin Recovery Lost & Found Desk. Please bring a valid ID and the reference code.',
+        'pickup_staff_email_domain' => '',
         'staff_notification_email' => 'staff@aerofind.online',
         'admin_notification_email' => '',
         'notify_admin_supervisor_on_add' => '1',
@@ -373,6 +538,30 @@ function af_setting(PDO $pdo, string $key, string $value): void {
     $stmt->execute([$key, $value]);
 }
 
+function af_audit_log(PDO $pdo, string $action, string $entity_type, string $entity_id, string $actor = '', array $details = []): void {
+    try {
+        $pdo->exec("CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            action TEXT,
+            entity_type TEXT,
+            entity_id TEXT,
+            actor TEXT,
+            details TEXT,
+            created_at DATETIME
+        )");
+        $stmt = $pdo->prepare("INSERT INTO audit_log (action, entity_type, entity_id, actor, details, created_at) VALUES (?, ?, ?, ?, ?, datetime('now'))");
+        $stmt->execute([
+            $action,
+            $entity_type,
+            $entity_id,
+            $actor,
+            json_encode($details, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        ]);
+    } catch (Throwable $e) {
+        error_log("AeroFind audit log warning: " . $e->getMessage());
+    }
+}
+
 function af_csrf_token(): string {
     af_start_secure_session();
     if (empty($_SESSION['csrf_token'])) {
@@ -400,7 +589,7 @@ function af_valid_url_or_path(string $value): string {
         return '';
     }
     if (preg_match('#^uploads/branding/[A-Za-z0-9._-]+$#', $value)) {
-        return $value;
+        return file_exists(__DIR__ . '/' . $value) ? $value : '';
     }
     return filter_var($value, FILTER_VALIDATE_URL) ? $value : '';
 }
@@ -681,4 +870,3 @@ if (!file_exists($backup_lock_file) || (time() - filemtime($backup_lock_file)) >
     @file_put_contents($backup_lock_file, (string)time());
     af_run_auto_backups();
 }
-
