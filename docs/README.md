@@ -28,7 +28,7 @@ The repository intentionally does not include production databases, uploaded pas
 |-- import_excel.py        # Spreadsheet import helper
 |-- stations.json          # Station code/name map
 |-- uploads/.htaccess      # Upload directory execution protection
-|-- docs/                  # Setup, operations, and architecture notes
+|-- docs/                  # Application documentation folder (all markdown docs)
 `-- .github/               # CI and GitHub collaboration templates
 ```
 
@@ -71,10 +71,14 @@ php build_release.php
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Setup](docs/setup.md)
-- [Operations](docs/operations.md)
-- [Deployment Checklist](docs/deployment-checklist.md)
+- [Architecture](architecture.md)
+- [Setup](setup.md)
+- [Operations](operations.md)
+- [Deployment Checklist](deployment-checklist.md)
+- [Git Workflow & Automated Deployment](git.md)
+- [Release Notes](RELEASE_NOTES.md)
+- [Contributing Guidelines](CONTRIBUTING.md)
+- [Security Policy](SECURITY.md)
 
 ## License
 

@@ -84,9 +84,29 @@ foreach (['index.php', 'api.php', 'public_api.php', 'staff.php', 'bootstrap.php'
     obfuscate_php_file($root . '/' . $file, $releaseDir . '/' . $file);
 }
 
-foreach (['.htaccess', 'RELEASE_NOTES.md', 'stations.json'] as $file) {
+foreach (['.htaccess', 'stations.json'] as $file) {
     if (file_exists($root . '/' . $file)) {
         copy_file($root . '/' . $file, $releaseDir . '/' . $file);
+    }
+}
+
+// Copy RELEASE_NOTES.md from its new location in the docs folder to the release root for compatibility
+if (file_exists($root . '/docs/RELEASE_NOTES.md')) {
+    copy_file($root . '/docs/RELEASE_NOTES.md', $releaseDir . '/RELEASE_NOTES.md');
+}
+
+// Copy the entire docs/ directory to the release build
+$docsSource = $root . '/docs';
+$docsTarget = $releaseDir . '/docs';
+if (is_dir($docsSource)) {
+    mkdirp($docsTarget);
+    $docFiles = scandir($docsSource);
+    if ($docFiles !== false) {
+        foreach ($docFiles as $docFile) {
+            if ($docFile !== '.' && $docFile !== '..') {
+                copy_file($docsSource . '/' . $docFile, $docsTarget . '/' . $docFile);
+            }
+        }
     }
 }
 
