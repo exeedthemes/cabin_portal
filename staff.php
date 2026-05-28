@@ -4666,8 +4666,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         class="flex-1 bg-[var(--card)] hover:bg-[var(--border)] border border-[var(--border)] text-[var(--text)] py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all">
                                         Check For Updates
                                     </button>
-                                    <button type="button" id="btn-update-now" onclick="triggerUpdate()"
-                                        class="flex-1 bg-rose-500 hover:bg-rose-600 text-white py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:scale-[1.02]">
+                                    <button type="button" id="btn-update-now" onclick="triggerUpdate()" disabled
+                                        class="flex-1 bg-slate-800 text-slate-500 cursor-not-allowed py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all border border-slate-700/50">
                                         Update Platform
                                     </button>
                                 </div>
@@ -6963,8 +6963,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 statusBadge.className = 'inline-flex items-center px-1.5 py-0.5 rounded text-[7px] font-black uppercase tracking-widest bg-emerald-500/10 text-emerald-400 ml-1.5';
                             }
                             if (btnUpdateNow) {
-                                btnUpdateNow.disabled = false;
-                                btnUpdateNow.className = 'flex-1 bg-rose-500 hover:bg-rose-600 text-white py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:scale-[1.02]';
+                                btnUpdateNow.disabled = true;
+                                btnUpdateNow.className = 'flex-1 bg-slate-800 text-slate-500 cursor-not-allowed py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all border border-slate-700/50';
                             }
                         }
                     } else {
@@ -7003,7 +7003,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 </svg>
                             </div>
                             <div>
-                                <h4 class="font-black text-xs uppercase tracking-tight text-[var(--text)]">Platform Update Available (v\${version})</h4>
+                                <h4 class="font-black text-xs uppercase tracking-tight text-[var(--text)]">Platform Update Available (v${version})</h4>
                                 <p class="text-[9px] text-[var(--secondary)] uppercase font-black tracking-widest mt-0.5">A new package release is ready for installation. Upgrade now for full feature enhancement.</p>
                             </div>
                         </div>
@@ -7024,28 +7024,35 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
         function triggerUpdate() {
-            const tokenInput = prompt("Enter the deployment security token to authorize this platform update:");
-            if (tokenInput === null) {
-                return; // User cancelled
-            }
-            
-            const trimmedToken = tokenInput.trim();
-            if (!trimmedToken) {
-                toast.error("Deployment security token is required.");
-                return;
-            }
-            
-            const settingsModal = document.getElementById('settings-modal');
-            if (settingsModal && !settingsModal.classList.contains('hidden')) {
-                toggleModal('settings-modal');
-            }
-            
-            toggleModal('deploy-modal');
-            
-            const iframe = document.getElementById('deploy-iframe');
-            if (iframe) {
-                iframe.src = 'deploy.php?token=' + encodeURIComponent(trimmedToken);
-            }
+            toast.input(
+                'Please enter the secret platform deployment key to authorize this core update.',
+                (tokenInput) => {
+                    const trimmedToken = tokenInput.trim();
+                    if (!trimmedToken) {
+                        toast.error("Deployment security token is required.");
+                        return;
+                    }
+                    
+                    const settingsModal = document.getElementById('settings-modal');
+                    if (settingsModal && !settingsModal.classList.contains('hidden')) {
+                        toggleModal('settings-modal');
+                    }
+                    
+                    toggleModal('deploy-modal');
+                    
+                    const iframe = document.getElementById('deploy-iframe');
+                    if (iframe) {
+                        iframe.src = 'deploy.php?token=' + encodeURIComponent(trimmedToken);
+                    }
+                },
+                null,
+                {
+                    title: 'Update Authorization',
+                    submitText: 'Authorize & Update',
+                    placeholder: 'Deployment Security Token',
+                    inputType: 'password'
+                }
+            );
         }
 
         // Exposed global function for external simulation testing
