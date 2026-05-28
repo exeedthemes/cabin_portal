@@ -1,10 +1,10 @@
-## 🛫 Summary
+## Summary
 
 Provide a clear and concise description of the changes proposed in this Pull Request.
 
 ---
 
-## 🛠️ Verification Checklist
+## Verification Checklist
 
 Please verify that your branch complies with the following staging checks:
 
@@ -15,7 +15,7 @@ Please verify that your branch complies with the following staging checks:
 
 ---
 
-## 📝 Operational & Security Notes
+## Operational & Security Notes
 
 *Describe any technical and operational dependencies affected by this update:*
 - **Database/Schema**: Does this branch introduce new tables, database schemas, or query migrations?

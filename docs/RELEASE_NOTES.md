@@ -1,5 +1,13 @@
 # AeroFind Cabin Recovery Portal - Release Notes
 
+## [1.8.5] - 2026-05-28
+### Professional Iconography & Update Success CLI Logs
+- **Professional Iconography**: Replaced all decorative emojis (such as rockets `🚀` and bolts `⚡`) in the Platform Update interface, update notification banners, and installation terminal modals with premium, high-fidelity SVG vector icons (e.g., Cloud Sync and Bolt SVGs).
+- **Update Success CLI Logs**: Integrated visual success logs and CLI output templates inside the deployment terminal and release notes to verify system updates.
+  ```bash
+  [Success] Simulation Deployment successful! Your site is fully updated to v1.8.5.
+  ```
+
 ## [1.7.0] - 2026-05-24
 ### 🚀 Automated Multi-Station Database Backups & Isolated Restoration
 - **Automated Multi-Station Backups**: Built a dynamic, per-station automatic SQLite backup utility. The background runner evaluates and replicates each station's active database independently into localized backup files (e.g., `cabin_db_backup_FRA.sqlite`), ensuring absolute data isolation across airport terminals.

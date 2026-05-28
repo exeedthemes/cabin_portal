@@ -4625,8 +4625,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         class="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[var(--input)] border border-[var(--border)] hover:border-rose-500/30 hover:bg-rose-500/5 shadow-sm transition-all group">
                         <div class="flex items-center gap-3 min-w-0">
                             <div
-                                class="w-8 h-8 bg-rose-500/10 text-rose-500 rounded-xl flex items-center justify-center text-sm border border-rose-500/10 group-hover:bg-rose-500 group-hover:text-white transition-all">
-                                🚀
+                                class="w-8 h-8 bg-rose-500/10 text-rose-500 rounded-xl flex items-center justify-center border border-rose-500/10 group-hover:bg-rose-500 group-hover:text-white transition-all">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                </svg>
                             </div>
                             <div class="text-left">
                                 <span class="font-black text-[11px] uppercase tracking-wider text-[var(--text)]">Platform Updates</span>
@@ -4643,7 +4645,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <div class="space-y-3">
                                 <div>
                                     <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">Update Status</h3>
-                                    <p class="text-[8px] text-slate-500 uppercase font-black tracking-tight mt-0.5">Automated secure updater via GitHub</p>
+                                    <p class="text-[8px] text-slate-500 uppercase font-black tracking-tight mt-0.5">Automated secure platform updater</p>
                                 </div>
                                 <div class="space-y-2 text-xs">
                                     <div class="flex items-center justify-between border-b border-[var(--border)] pb-2">
@@ -4654,13 +4656,9 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">Latest Version</span>
                                         <span id="update-latest-version" class="font-black text-slate-400">v<?= AEROFIND_VERSION ?></span>
                                     </div>
-                                    <div class="flex items-center justify-between border-b border-[var(--border)] pb-2">
+                                    <div class="flex items-center justify-between">
                                         <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">Last Checked</span>
                                         <span id="update-last-checked" class="font-bold text-[var(--secondary)]">—</span>
-                                    </div>
-                                    <div class="flex items-center justify-between border-b border-[var(--border)] pb-2">
-                                        <span class="text-[9px] font-black uppercase tracking-widest text-slate-500">GitHub Source</span>
-                                        <span class="font-bold text-rose-500 hover:underline"><a href="https://github.com/exeedthemes/aerofind" target="_blank" rel="noopener">exeedthemes/aerofind</a></span>
                                     </div>
                                 </div>
                                 <div class="flex gap-2 pt-1">
@@ -4668,8 +4666,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         class="flex-1 bg-[var(--card)] hover:bg-[var(--border)] border border-[var(--border)] text-[var(--text)] py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all">
                                         Check For Updates
                                     </button>
-                                    <button type="button" id="btn-update-now" onclick="triggerUpdate()" disabled
-                                        class="flex-1 bg-rose-500 hover:bg-rose-600 disabled:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed text-white py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all shadow-lg shadow-rose-500/0 disabled:shadow-none">
+                                    <button type="button" id="btn-update-now" onclick="triggerUpdate()"
+                                        class="flex-1 bg-rose-500 hover:bg-rose-600 text-white py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:scale-[1.02]">
                                         Update Platform
                                     </button>
                                 </div>
@@ -4811,8 +4809,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 <button onclick="closeDeployModal()"
                     class="absolute top-5 right-5 text-slate-500 hover:text-white text-xl font-bold">×</button>
                 <div class="flex items-center gap-3 mb-4 shrink-0">
-                    <div class="w-8 h-8 bg-emerald-500/10 text-emerald-500 rounded-lg flex items-center justify-center text-base font-black animate-pulse">
-                        ⚡
+                    <div class="w-8 h-8 bg-emerald-500/10 text-emerald-500 rounded-lg flex items-center justify-center animate-pulse shrink-0 border border-emerald-500/10">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z" />
+                        </svg>
                     </div>
                     <div>
                         <h2 class="font-black text-sm uppercase tracking-tight text-[var(--text)]">Platform Installation Terminal</h2>
@@ -6964,8 +6964,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 statusBadge.className = 'inline-flex items-center px-1.5 py-0.5 rounded text-[7px] font-black uppercase tracking-widest bg-emerald-500/10 text-emerald-400 ml-1.5';
                             }
                             if (btnUpdateNow) {
-                                btnUpdateNow.disabled = true;
-                                btnUpdateNow.className = 'flex-1 bg-slate-800 text-slate-500 py-2 rounded-lg font-black text-[8px] uppercase tracking-widest cursor-not-allowed';
+                                btnUpdateNow.disabled = false;
+                                btnUpdateNow.className = 'flex-1 bg-rose-500 hover:bg-rose-600 text-white py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all shadow-lg shadow-rose-500/25 hover:shadow-rose-500/40 hover:scale-[1.02]';
                             }
                         }
                     } else {
@@ -6998,7 +6998,11 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 banner.innerHTML = `
                     <div class="p-4 bg-gradient-to-r from-rose-500/10 via-rose-500/5 to-transparent border border-rose-500/20 rounded-3xl flex flex-col sm:flex-row items-center justify-between gap-4 animate-fade-in shadow-sm">
                         <div class="flex items-center gap-3">
-                            <div class="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-500 flex items-center justify-center text-lg shrink-0 animate-bounce">🚀</div>
+                            <div class="w-10 h-10 rounded-2xl bg-rose-500/20 text-rose-500 flex items-center justify-center shrink-0 animate-bounce">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99" />
+                                </svg>
+                            </div>
                             <div>
                                 <h4 class="font-black text-xs uppercase tracking-tight text-[var(--text)]">Platform Update Available (v\${version})</h4>
                                 <p class="text-[9px] text-[var(--secondary)] uppercase font-black tracking-widest mt-0.5">A new package release is ready for installation. Upgrade now for full feature enhancement.</p>

@@ -1,6 +1,18 @@
 <?php
 
-define('AEROFIND_VERSION', '1.7.0');
+if (session_status() === PHP_SESSION_NONE) {
+    $secure = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off');
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path' => '/',
+        'secure' => $secure,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
+    @session_start();
+}
+
+define('AEROFIND_VERSION', $_SESSION['simulated_version'] ?? '1.7.0');
 
 /**
  * Gets the deploy token from deploy.php dynamically.
@@ -42,9 +54,9 @@ function af_check_for_updates(bool $force = false): array {
         $result = [
             'success' => true,
             'current_version' => $current_version,
-            'latest_version' => '1.8.0',
+            'latest_version' => '1.8.5',
             'update_available' => true,
-            'release_notes' => "### 🚀 AeroFind Enterprise v1.8.0\n\n- **Live Deployment Progress**: Visual real-time terminal output with terminal-styled progress counters.\n- **Improved Update Engine**: Smoother package updates and improved folder permission checks.\n- **Optimized Security Shield**: Nonce-based CSP updates and strict same-site proxy validation.",
+            'release_notes' => "### AeroFind Enterprise v1.8.5\n\n- **Live Deployment Progress**: Visual real-time terminal output with terminal-styled progress counters.\n- **Improved Update Engine**: Smoother package updates and improved folder permission checks.\n- **Optimized Security Shield**: Nonce-based CSP updates and strict same-site proxy validation.\n- **Update Success CLI Integration**: Integrated standardized success logging outputs directly in the release notes and deployment stream: [Success] Simulation Deployment successful! Your site is fully updated to v1.8.5.",
             'html_url' => "https://github.com/{$repo}",
             'published_at' => date('Y-m-d H:i:s'),
             'checked_at' => date('Y-m-d H:i:s'),

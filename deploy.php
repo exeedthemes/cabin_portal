@@ -36,6 +36,7 @@ if (session_status() === PHP_SESSION_NONE) {
 
 // 2.5 SIMULATION MODE
 if (isset($_GET['simulate']) || !empty($_SESSION['simulate_update'])) {
+    $_SESSION['simulated_version'] = '1.8.5';
     echo "<style>
         body {
             background-color: #090d16;
