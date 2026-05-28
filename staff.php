@@ -6914,7 +6914,6 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     <script>
         // Platform Updates JavaScript
         let currentUpdateInfo = null;
-        const deployToken = <?= json_encode(af_get_deploy_token()) ?>;
 
         function checkForUpdates(force = false) {
             const statusBadge = document.getElementById('update-badge-status');
@@ -7025,23 +7024,28 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
         function triggerUpdate() {
-            toast.confirm('Are you sure you want to trigger the automatic update? This will fetch the latest files directly from GitHub and overwrite current source files.', () => {
-                const settingsModal = document.getElementById('settings-modal');
-                if (settingsModal && !settingsModal.classList.contains('hidden')) {
-                    toggleModal('settings-modal');
-                }
-                
-                toggleModal('deploy-modal');
-                
-                const iframe = document.getElementById('deploy-iframe');
-                if (iframe) {
-                    iframe.src = 'deploy.php?token=' + encodeURIComponent(deployToken);
-                }
-            }, null, {
-                title: 'Confirm Update',
-                confirmText: 'Yes, Update Platform',
-                intent: 'danger'
-            });
+            const tokenInput = prompt("Enter the deployment security token to authorize this platform update:");
+            if (tokenInput === null) {
+                return; // User cancelled
+            }
+            
+            const trimmedToken = tokenInput.trim();
+            if (!trimmedToken) {
+                toast.error("Deployment security token is required.");
+                return;
+            }
+            
+            const settingsModal = document.getElementById('settings-modal');
+            if (settingsModal && !settingsModal.classList.contains('hidden')) {
+                toggleModal('settings-modal');
+            }
+            
+            toggleModal('deploy-modal');
+            
+            const iframe = document.getElementById('deploy-iframe');
+            if (iframe) {
+                iframe.src = 'deploy.php?token=' + encodeURIComponent(trimmedToken);
+            }
         }
 
         // Exposed global function for external simulation testing
