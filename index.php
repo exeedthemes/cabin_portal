@@ -527,7 +527,7 @@ $active_station = af_get_current_station();
         }
     </style>
     <script>
-        const theme = localStorage.getItem('theme') || 'dark';
+        const theme = localStorage.getItem('theme') || 'light';
         if (theme === 'dark') document.documentElement.classList.add('dark');
         function toggleTheme() {
             const isDark = document.documentElement.classList.toggle('dark');

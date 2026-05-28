@@ -3364,7 +3364,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
     </style>
     <script>
-        const theme = localStorage.getItem('theme') || 'dark';
+        const theme = localStorage.getItem('theme') || 'light';
         if (theme === 'dark') document.documentElement.classList.add('dark');
         function toggleTheme() {
             const isDark = document.documentElement.classList.toggle('dark');
