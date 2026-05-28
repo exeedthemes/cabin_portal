@@ -3630,11 +3630,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             <button onclick="toggleModal('support-modal')"
                 class="staff-fab-item w-12 h-12 md:w-14 md:h-14 bg-emerald-500 text-white rounded-2xl flex items-center justify-center shadow-2xl shadow-emerald-500/30 hover:scale-110 transition-all group relative">
                 <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"
-                    aria-hidden="true">
-                    <path stroke-linecap="round" stroke-linejoin="round"
-                        d="M8.25 9a3.75 3.75 0 117.02 1.86c-.87.52-1.27 1.02-1.27 2.14" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 17h.01" />
-                    <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                    <line x1="12" y1="17" x2="12.01" y2="17" />
                 </svg>
                 <span
                     class="absolute right-full mr-4 px-3 py-1 bg-slate-900 text-white text-[10px] font-black rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none uppercase tracking-widest">Support</span>
@@ -3644,9 +3643,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             <button onclick="toggleModal('airline-modal')"
                 class="staff-fab-item w-12 h-12 md:w-14 md:h-14 bg-blue-500 text-white rounded-2xl flex items-center justify-center shadow-2xl shadow-blue-500/40 hover:scale-110 hover:rotate-12 transition-all group relative">
                 <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"
-                    aria-hidden="true">
-                    <path stroke-linecap="round" stroke-linejoin="round"
-                        d="M10.5 6.5L3 3.75v2.5l5.5 3.25L3 12.75v2.5l7.5-2.75 3.5 6.5h2l-1.5-7.5 5.5-2a1.5 1.5 0 000-2.85l-5.5-2L16 3h-2l-3.5 3.5z" />
+                    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L14 19v-5.5L21 16z" />
                 </svg>
                 <span
                     class="absolute right-full mr-4 px-3 py-1 bg-slate-900 text-white text-[10px] font-black rounded-lg opacity-0 group-hover:opacity-100 transition-opacity whitespace-nowrap pointer-events-none uppercase tracking-widest">Manage
@@ -3690,11 +3688,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <div
                         class="staff-modal-icon w-10 h-10 bg-emerald-500/10 text-emerald-500 rounded-xl flex items-center justify-center text-lg font-black">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"
-                            aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M8.25 9a3.75 3.75 0 117.02 1.86c-.87.52-1.27 1.02-1.27 2.14" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 17h.01" />
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <circle cx="12" cy="12" r="10" />
+                            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                            <line x1="12" y1="17" x2="12.01" y2="17" />
                         </svg>
                     </div>
                     <h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Support</h2>
@@ -3903,9 +3900,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     <div
                         class="staff-modal-icon w-10 h-10 bg-blue-500/10 text-blue-500 rounded-xl flex items-center justify-center text-lg font-black">
                         <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"
-                            aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M10.5 6.5L3 3.75v2.5l5.5 3.25L3 12.75v2.5l7.5-2.75 3.5 6.5h2l-1.5-7.5 5.5-2a1.5 1.5 0 000-2.85l-5.5-2L16 3h-2l-3.5 3.5z" />
+                            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                            <path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L14 19v-5.5L21 16z" />
                         </svg>
                     </div>
                     <div class="min-w-0">

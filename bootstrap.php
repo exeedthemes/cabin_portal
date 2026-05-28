@@ -93,7 +93,9 @@ function af_check_for_updates(bool $force = false): array {
     
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
+    if (defined('PHP_VERSION_ID') && PHP_VERSION_ID < 80500) {
+        @curl_close($ch);
+    }
     
     $result = [
         'success' => false,
