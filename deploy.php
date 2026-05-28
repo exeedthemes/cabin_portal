@@ -34,6 +34,22 @@ if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
 
+echo "<script>
+    const autoScroll = () => {
+        if (document.body) {
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+        }
+    };
+    window.addEventListener('DOMContentLoaded', () => {
+        if (document.body) {
+            const observer = new MutationObserver(autoScroll);
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
+        autoScroll();
+    });
+    setInterval(autoScroll, 100);
+</script>";
+
 // 2.5 SIMULATION MODE
 if (isset($_GET['simulate']) || !empty($_SESSION['simulate_update'])) {
     $_SESSION['simulated_version'] = '1.8.5';
