@@ -12,7 +12,7 @@ if (session_status() === PHP_SESSION_NONE) {
     @session_start();
 }
 
-define('AEROFIND_VERSION', $_SESSION['simulated_version'] ?? '1.7.0');
+define('AEROFIND_VERSION', $_SESSION['simulated_version'] ?? '1.8.5');
 
 /**
  * Gets the deploy token from deploy.php dynamically.
