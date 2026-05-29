@@ -79,7 +79,7 @@ if (isset($_GET['simulate']) || !empty($_SESSION['simulate_update'])) {
     echo "<h2>AeroFind Platform Deployer (Simulation Mode)</h2>";
     echo "<span class='text-info'>[Info] Initializing dry-run simulation of AeroFind Platform Updates...</span><br>";
     flush(); ob_flush(); usleep(600000);
-    echo "Connecting to GitHub API v3 (exeedthemes/aerofind)...<br>";
+    echo "Connecting to GitHub API v3 (exeedthemes/cabin_portal)...<br>";
     flush(); ob_flush(); usleep(400000);
     echo "Downloading package archive: <code>aerofind-archive-v1.8.5.zip</code> (24.8 MB)<br>";
     flush(); ob_flush(); usleep(800000);

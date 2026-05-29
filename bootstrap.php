@@ -48,7 +48,7 @@ function af_check_for_updates(bool $force = false): array {
         }
     }
     
-    $repo = 'exeedthemes/aerofind';
+    $repo = 'exeedthemes/cabin_portal';
     
     if ($simulate) {
         $result = [
