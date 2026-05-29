@@ -1,5 +1,11 @@
 # AeroFind Cabin Recovery Portal - Release Notes
 
+## [1.8.6] - 2026-05-29
+
+- **Cabin Portal Release Source**: Update checks now use `exeedthemes/cabin_portal` releases only.
+- **Deploy Script Updates**: The generated release now includes `deploy.php`, and the installer preserves live `DEPLOY_TOKEN` and `GITHUB_PAT` values while updating the deploy script.
+- **Release Package Integrity**: The obfuscated release zip remains free of `config.local.php` and includes runtime upload directories.
+
 ## [1.8.5] - 2026-05-28
 ### Professional Iconography & Update Success CLI Logs
 - **Professional Iconography**: Replaced all decorative emojis (such as rockets `🚀` and bolts `⚡`) in the Platform Update interface, update notification banners, and installation terminal modals with premium, high-fidelity SVG vector icons (e.g., Cloud Sync and Bolt SVGs).

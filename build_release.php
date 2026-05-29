@@ -84,6 +84,8 @@ foreach (['index.php', 'api.php', 'public_api.php', 'staff.php', 'bootstrap.php'
     obfuscate_php_file($root . '/' . $file, $releaseDir . '/' . $file);
 }
 
+copy_file($root . '/deploy.php', $releaseDir . '/deploy.php');
+
 foreach (['.htaccess', 'stations.json'] as $file) {
     if (file_exists($root . '/' . $file)) {
         copy_file($root . '/' . $file, $releaseDir . '/' . $file);

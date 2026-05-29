@@ -12,7 +12,7 @@ if (session_status() === PHP_SESSION_NONE) {
     @session_start();
 }
 
-define('AEROFIND_VERSION', $_SESSION['simulated_version'] ?? '1.8.5');
+define('AEROFIND_VERSION', $_SESSION['simulated_version'] ?? '1.8.6');
 
 /**
  * Gets the deploy token from deploy.php dynamically.
@@ -54,9 +54,9 @@ function af_check_for_updates(bool $force = false): array {
         $result = [
             'success' => true,
             'current_version' => $current_version,
-            'latest_version' => '1.8.5',
+            'latest_version' => '1.8.6',
             'update_available' => true,
-            'release_notes' => "### AeroFind Enterprise v1.8.5\n\n- **Live Deployment Progress**: Visual real-time terminal output with terminal-styled progress counters.\n- **Improved Update Engine**: Smoother package updates and improved folder permission checks.\n- **Optimized Security Shield**: Nonce-based CSP updates and strict same-site proxy validation.\n- **Update Success CLI Integration**: Integrated standardized success logging outputs directly in the release notes and deployment stream: [Success] Simulation Deployment successful! Your site is fully updated to v1.8.5.",
+            'release_notes' => "### AeroFind Enterprise v1.8.6\n\n- **Cabin Portal Release Source**: Update checks now use the cabin_portal GitHub releases only.\n- **Deploy Script Updates**: The release package now includes deploy.php and preserves live deployment credentials while updating the installer.\n- **Obfuscated Release Install**: The updater installs the bundled cabin_portal obfuscated package.",
             'html_url' => "https://github.com/{$repo}",
             'published_at' => date('Y-m-d H:i:s'),
             'checked_at' => date('Y-m-d H:i:s'),
