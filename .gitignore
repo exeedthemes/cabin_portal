@@ -8,11 +8,13 @@
 *.db3
 
 # Generated/runtime files
-release/
 uploads/*
 !uploads/.htaccess
 __pycache__/
 *.py[cod]
+release/.DS_Store
+release/**/.DS_Store
+release/**/config.local.php
 
 # Secrets and local environment
 .env

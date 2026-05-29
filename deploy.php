@@ -11,6 +11,8 @@ define('DEPLOY_TOKEN', 'aerofind_secure_deploy_2026');
 // If your repository is PRIVATE, you MUST generate a classic or fine-grained GitHub PAT
 // with "repo" (read) permissions and paste it here. Leave empty if the repository is PUBLIC.
 define('GITHUB_PAT', '');
+define('RELEASE_INSTALL_DIR', 'release/cabin_portal_obfuscated');
+define('RELEASE_ARCHIVE_PATH', 'release/cabin_portal_obfuscated.zip');
 
 // Validate request
 if (!isset($_GET['token']) || $_GET['token'] !== DEPLOY_TOKEN) {
@@ -151,7 +153,7 @@ echo "<style>
     }
 </style>";
 echo "<h2>AeroFind Platform Deployer</h2>";
-echo "Fetching latest package build from GitHub...<br>";
+echo "Fetching latest obfuscated package build from GitHub...<br>";
 
 // Set longer timeout
 set_time_limit(180);
@@ -195,7 +197,7 @@ if (substr($data, 0, 2) !== 'PK') {
 }
 
 file_put_contents($zip_file, $data);
-echo "<span class='text-success'>[Success] Downloaded successfully.</span><br>Extracting archive...<br>";
+echo "<span class='text-success'>[Success] Downloaded repository package successfully.</span><br>Extracting archive...<br>";
 
 // Extract the ZIP
 $extracted = false;
@@ -245,10 +247,11 @@ if (empty($dirs)) {
 }
 
 $extracted_root = $dirs[0];
+$release_root = locate_release_root($extracted_root, $extract_to);
 
-echo "Updating live files...<br>";
-// Copy the files from the extracted folder to the live site directory
-copy_directory($extracted_root, __DIR__);
+echo "Installing obfuscated release package...<br>";
+// Copy the obfuscated release build from the repository archive to the live site directory.
+copy_directory($release_root, __DIR__);
 
 // Clean up temporary files
 echo "Cleaning up temporary files...<br>";
@@ -259,6 +262,49 @@ echo "<h3>[Success] Deployment successful! Your site is fully updated.</h3>";
 
 // --- Helper Functions ---
 
+function locate_release_root($repo_root, $extract_to)
+{
+    $release_zip = $repo_root . '/' . RELEASE_ARCHIVE_PATH;
+    if (is_file($release_zip)) {
+        $release_extract_to = rtrim($extract_to, '/') . '/release_package/';
+        echo "Extracting tracked obfuscated release archive: <code>" . htmlspecialchars(RELEASE_ARCHIVE_PATH) . "</code><br>";
+
+        $extracted = false;
+        if (class_exists('ZipArchive')) {
+            $zip = new ZipArchive;
+            if ($zip->open($release_zip) === TRUE) {
+                @mkdir($release_extract_to, 0755, true);
+                $zip->extractTo($release_extract_to);
+                $zip->close();
+                $extracted = true;
+            }
+        }
+
+        if (!$extracted) {
+            @mkdir($release_extract_to, 0755, true);
+            $output = [];
+            $return_var = 0;
+            exec("unzip -o " . escapeshellarg($release_zip) . " -d " . escapeshellarg($release_extract_to) . " 2>&1", $output, $return_var);
+            if ($return_var !== 0) {
+                die("<span class='text-error'>[Error] Failed to extract bundled obfuscated release archive. Reason:<br>" . implode("<br>", array_map('htmlspecialchars', $output)) . "</span>");
+            }
+        }
+
+        $release_dir = $release_extract_to . 'cabin_portal_obfuscated';
+        if (is_dir($release_dir)) {
+            return $release_dir;
+        }
+    }
+
+    $release_dir = $repo_root . '/' . RELEASE_INSTALL_DIR;
+    if (is_dir($release_dir)) {
+        echo "Tracked release archive not found; using obfuscated release directory: <code>" . htmlspecialchars(RELEASE_INSTALL_DIR) . "</code><br>";
+        return $release_dir;
+    }
+
+    die("<span class='text-error'>[Error] No obfuscated release package found in the downloaded repository archive. Expected <code>" . htmlspecialchars(RELEASE_INSTALL_DIR) . "</code>.</span>");
+}
+
 function copy_directory($src, $dst)
 {
     $dir = opendir($src);
@@ -268,6 +314,10 @@ function copy_directory($src, $dst)
             // Keep production database credentials safe: never overwrite an existing db_config.php file
             if ($file === 'db_config.php' && file_exists($dst . '/' . $file)) {
                 echo "<span class='text-info'>[Info] Retaining active database configuration (skipped db_config.php overwrite).</span><br>";
+                continue;
+            }
+            if ($file === 'config.local.php' && file_exists($dst . '/' . $file)) {
+                echo "<span class='text-info'>[Info] Retaining active local application secret (skipped config.local.php overwrite).</span><br>";
                 continue;
             }
             if (is_dir($src . '/' . $file)) {

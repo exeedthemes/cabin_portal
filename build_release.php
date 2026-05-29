@@ -111,8 +111,6 @@ if (is_dir($docsSource)) {
 }
 
 copy_file($root . '/uploads/.htaccess', $releaseDir . '/uploads/.htaccess');
-copy_file($configPath, $releaseDir . '/config.local.php');
-
 if (file_exists($root . '/import_excel.py')) {
     copy_file($root . '/import_excel.py', $releaseDir . '/import_excel.py');
 }

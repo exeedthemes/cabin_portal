@@ -1,0 +1,12 @@
+Options -Indexes
+php_flag engine off
+
+<FilesMatch "\.(php|phtml|phar|cgi|pl|sh)$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "\.(eml|json|db|sqlite|log|ini)$">
+    Require all denied
+</FilesMatch>
+
+RedirectMatch 404 "/uploads/\."
