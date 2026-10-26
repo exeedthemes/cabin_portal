@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/references.php';
 require_once __DIR__ . '/mailer.php';
+require_once __DIR__ . '/categories.php';
+require_once __DIR__ . '/matching.php';
 af_security_headers('json');
 $pdo = af_db();
 
@@ -28,33 +31,7 @@ function normalize_tag($tag)
 
 function next_item_tag(PDO $pdo)
 {
-    $stmt = $pdo->query("
-        SELECT tag_no
-        FROM (
-            SELECT tag_no FROM items WHERE tag_no GLOB 'ID-[0-9]*'
-            UNION ALL
-            SELECT tag_no FROM pending_reports WHERE tag_no GLOB 'ID-[0-9]*'
-        )
-        ORDER BY CAST(substr(tag_no, 4) AS INTEGER) ASC
-    ");
-    $occupied = [];
-    $width = 4;
-    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $tag_no) {
-        if (preg_match('/^ID-(\d+)/i', (string) $tag_no, $matches)) {
-            $number = (int) $matches[1];
-            if ($number > 0) {
-                $occupied[$number] = true;
-                $width = max($width, strlen($matches[1]));
-            }
-        }
-    }
-
-    $next_num = 1;
-    while (isset($occupied[$next_num])) {
-        $next_num++;
-    }
-
-    return 'ID-' . str_pad((string) $next_num, max(4, $width), '0', STR_PAD_LEFT);
+    return af_next_reference_tag($pdo, 'ID');
 }
 
 function next_report_ref(PDO $pdo)
@@ -217,19 +194,6 @@ try {
         $params = [];
         $params[':days_range'] = '-' . $days . ' days';
 
-        if ($flight !== '') {
-            $query .= " AND (tag_no LIKE :flight OR other_info LIKE :flight)";
-            $params[':flight'] = '%' . $flight . '%';
-        }
-        if ($date !== '') {
-            $query .= " AND other_info LIKE :date";
-            $params[':date'] = '%' . $date . '%';
-        }
-        if ($category !== '') {
-            $query .= " AND item_description LIKE :cat";
-            $params[':cat'] = '%' . $category . '%';
-        }
-
         $query .= " ORDER BY CASE WHEN tag_no GLOB 'ID-[0-9]*' THEN 0 ELSE 1 END ASC, CAST(substr(tag_no, 4) AS INTEGER) DESC, created_at DESC LIMIT 500";
 
         $stmt = $pdo->prepare($query);
@@ -251,6 +215,9 @@ try {
         }
 
         foreach ($items as $item) {
+            $public_category = af_public_item_category($item['item_description'] ?? '');
+            if ($category !== '' && stripos($public_category, $category) === false) continue;
+            if ($flight !== '' && stripos($item['tag_no'] ?? '', $flight) === false) continue;
             $found_airline = null;
             $other_info = trim($item['other_info'] ?? '');
             $tag_no = trim($item['tag_no'] ?? '');
@@ -281,13 +248,14 @@ try {
             if (!isset($grouped[$group_name])) {
                 $grouped[$group_name] = ['airline' => $group_airline, 'items' => []];
             }
-            $is_identity_document = stripos($item['tag_no'] ?? '', 'PP-') === 0;
+            $is_identity_document = stripos($item['tag_no'] ?? '', 'PP-') === 0
+                || af_detect_item_category($item['item_description'] ?? '') === 'documents';
             $grouped[$group_name]['items'][] = [
                 'id' => $item['tag_no'],
                 'reference_code' => $item['tag_no'],
-                'flight_number' => public_flight_label($item['other_info'] ?? ''),
-                'item_category' => $item['item_description'],
-                'item_description' => $item['item_description'],
+                // Journey and seat details remain private for staff verification.
+                'item_category' => af_public_item_category($item['item_description'] ?? ''),
+                'item_description' => $is_identity_document ? $public_category : ($item['item_description'] ?? ''),
                 'photo' => $is_identity_document ? '' : ($item['photo'] ?? ''),
                 'is_identity_document' => $is_identity_document,
                 'status' => $item['status'],
@@ -366,24 +334,10 @@ try {
         $staff_email = $settings['staff_notification_email'] ?? '';
         $company_name = $settings['company_name'] ?? 'AeroFind Cabin Recovery';
         $company_short_name = $settings['company_short_name'] ?? 'AeroFind';
-        $possible_stmt = $pdo->prepare("
-            SELECT tag_no, item_description, other_info, status
-            FROM items
-            WHERE (
-                item_description LIKE :desc
-                OR other_info LIKE :flight
-                OR pax_email = :email
-            )
-            ORDER BY created_at DESC
-            LIMIT 5
-        ");
-        $desc_probe = '%' . substr($item_description, 0, 24) . '%';
-        $possible_stmt->execute([
-            ':desc' => $desc_probe,
-            ':flight' => '%' . $flight_number . '%',
-            ':email' => $pax_email
-        ]);
-        $possible_matches = $possible_stmt->fetchAll(PDO::FETCH_ASSOC);
+        $possible_matches = af_rank_matches([
+            'tag_no' => $tag, 'item_description' => $item_description,
+            'flight_number' => $flight_number, 'pax_email' => $pax_email
+        ], af_match_candidates($pdo));
         $flight_details = af_mail_flight_display($pdo, trim("$airline_name $flight_number"));
 
         $staff_mail = af_mail_result(false, 'none', 'Staff notification email is not configured.');
@@ -393,7 +347,8 @@ try {
                 $match_rows[] = [
                     $match['tag_no'] ?? '',
                     $match['item_description'] ?? '',
-                    $match['status'] ?? ''
+                    $match['status'] ?? '',
+                    implode(' · ', $match['match_reasons'])
                 ];
             }
             $staff_email_content = af_lost_report_staff_email($settings, [
@@ -452,6 +407,11 @@ try {
     }
 
     if ($action === 'claimItem') {
+        if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+            http_response_code(405);
+            echo json_encode(['success' => false, 'error' => 'Claim requests must be submitted using the claim form.']);
+            exit;
+        }
         $tag = normalize_tag($input['tag_no'] ?? '');
         $pax_name = trim($input['pax_name'] ?? '');
         $pax_email = trim($input['pax_email'] ?? '');
@@ -467,6 +427,28 @@ try {
             exit;
         }
 
+        $flight_number = strtoupper(trim((string) ($input['flight_number'] ?? '')));
+        $flight_date = trim((string) ($input['flight_date'] ?? ''));
+        $ownership_details = trim((string) ($input['ownership_details'] ?? ''));
+        $parsed_date = DateTimeImmutable::createFromFormat('!Y-m-d', $flight_date);
+        if (!preg_match('/^[A-Z0-9]{2,3}\s?-?\s?\d{1,4}[A-Z]?$/', $flight_number)
+            || !$parsed_date || $parsed_date->format('Y-m-d') !== $flight_date
+            || $flight_date > gmdate('Y-m-d')) {
+            echo json_encode(['success' => false, 'error' => 'Enter a valid flight number and travel date (today or earlier).']);
+            exit;
+        }
+        if (strlen($ownership_details) < 10 || strlen($ownership_details) > 2000
+            || strlen($seat_info) > 100 || strlen($pax_name) > 150
+            || strlen($pax_contact) > 100 || strlen($pax_email) > 254) {
+            echo json_encode(['success' => false, 'error' => 'Describe distinctive ownership details in 10–2000 characters and keep contact and seat details brief.']);
+            exit;
+        }
+        if (($input['ownership_confirmation'] ?? '') !== '1' || ($input['privacy_consent'] ?? '') !== '1') {
+            echo json_encode(['success' => false, 'error' => 'Confirm ownership and consent to processing this claim before submitting.']);
+            exit;
+        }
+        $verification_details = "Flight: $flight_number | Travel date: $flight_date | Seat: $seat_info\nOwnership evidence (unverified): $ownership_details";
+
         // Fetch item details
         $stmt = $pdo->prepare("SELECT * FROM items WHERE tag_no = ?");
         $stmt->execute([$tag]);
@@ -476,24 +458,18 @@ try {
             echo json_encode(['success' => false, 'error' => 'Item reference not found']);
             exit;
         }
-        if (($item['status'] ?? '') !== 'Found') {
+        $visibility_days = max(1, min(365, (int) (af_settings($pdo)['passenger_view_days'] ?? 30)));
+        if (($item['status'] ?? '') !== 'Found' || ($item['created_at'] ?? '') < gmdate('Y-m-d', strtotime("-$visibility_days days"))) {
             echo json_encode(['success' => false, 'error' => 'This item is not currently available for public claim.']);
             exit;
         }
 
-        $claim_note_parts = [
-            'Claim submitted ' . date('Y-m-d H:i'),
-            'Passenger: ' . $pax_name,
-            'Email: ' . $pax_email
-        ];
-        if ($pax_contact !== '') {
-            $claim_note_parts[] = 'Phone: ' . $pax_contact;
-        }
-        if ($seat_info !== '') {
-            $claim_note_parts[] = 'Seat/flight: ' . $seat_info;
-        }
-        $updated_internal_note = append_unique_note($item['user_comments'] ?? '', implode(' | ', $claim_note_parts));
-        $updated_seat_info = $seat_info !== '' ? $seat_info : ($item['comments'] ?? '');
+        // Passenger text belongs in the evidence field, never in staff workflow notes:
+        // legacy approval detection reads those notes for the words "Claim approved".
+        $claim_note = 'Claim request submitted (ownership unverified) ' . gmdate('c')
+            . ' | Ownership declaration and privacy consent recorded. Staff review required.';
+        $updated_internal_note = append_unique_note($item['user_comments'] ?? '', $claim_note);
+        $updated_seat_info = $verification_details;
 
         $update_stmt = $pdo->prepare("
             UPDATE items
@@ -503,9 +479,14 @@ try {
                 pax_contact_no = ?,
                 comments = ?,
                 user_comments = ?
-            WHERE tag_no = ?
+            WHERE tag_no = ? AND status = 'Found'
         ");
         $update_stmt->execute([$pax_name, $pax_email, $pax_contact, $updated_seat_info, $updated_internal_note, $tag]);
+        if ($update_stmt->rowCount() !== 1) {
+            echo json_encode(['success' => false, 'error' => 'This item is already under review. Please contact staff.']);
+            exit;
+        }
+        af_audit_log($pdo, 'claim_submitted', 'item', $tag, 'Passenger', ['ownership_verified' => false, 'privacy_consent' => true]);
 
         // Get station-specific mail and pickup settings.
         $settings = af_settings($pdo);
@@ -520,8 +501,8 @@ try {
         $pax_email_content = af_claim_confirmation_email($settings, [
             'tag' => $tag,
             'pax_name' => $pax_name,
-            'item_description' => $item['item_description'] ?? '',
-            'flight_details' => af_mail_flight_display($pdo, $item['other_info'] ?? ''),
+            'item_description' => af_public_item_category($item['item_description'] ?? ''),
+            'flight_details' => $flight_number . ' / ' . $flight_date,
             'pickup_info' => $pickup_info
         ]);
 
@@ -533,7 +514,7 @@ try {
             'pax_name' => $pax_name,
             'pax_email' => $pax_email,
             'pax_contact' => $pax_contact,
-            'seat_info' => $seat_info,
+            'seat_info' => $verification_details,
             'item_description' => $item['item_description'] ?? ''
         ]);
 

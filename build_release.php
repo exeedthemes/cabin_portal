@@ -80,7 +80,7 @@ mkdirp($releaseDir . '/uploads/branding');
 
 $configPath = ensure_local_config($root);
 
-foreach (['index.php', 'api.php', 'public_api.php', 'staff.php', 'bootstrap.php', 'mailer.php', 'privacy.php', 'impressum.php'] as $file) {
+foreach (['matching.php', 'references.php', 'categories.php', 'fees.php', 'staff_fees.php', 'staff_fee_settings.php', 'index.php', 'api.php', 'public_api.php', 'staff.php', 'bootstrap.php', 'mailer.php', 'privacy.php', 'impressum.php'] as $file) {
     obfuscate_php_file($root . '/' . $file, $releaseDir . '/' . $file);
 }
 

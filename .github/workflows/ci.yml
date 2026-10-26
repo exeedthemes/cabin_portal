@@ -30,6 +30,15 @@ jobs:
             -path './uploads' -prune -o \
             -name '*.php' -print0 | xargs -0 -n1 php -l
 
+      - name: Billing and category checks
+        run: |
+          php tests/fees.php
+          php tests/categories.php
+          php tests/references.php
+          php tests/public_claims.php
+          php tests/matching.php
+          node tests/history.cjs
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:

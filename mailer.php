@@ -427,7 +427,7 @@ function af_lost_report_staff_email(array $settings, array $details): array
         'sections' => [
             [
                 'title' => 'Possible existing records',
-                'html' => af_email_data_table(['Reference', 'Item', 'Status'], $match_rows, 'No obvious existing records found.')
+                'html' => af_email_data_table(['Reference', 'Item', 'Status', 'Why suggested'], $match_rows, 'No obvious existing records found.')
             ]
         ],
         'footer' => 'Review this report in the staff portal before creating or linking an inventory record.'

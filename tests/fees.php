@@ -1,0 +1,40 @@
+<?php
+require_once __DIR__ . '/../categories.php';
+require_once __DIR__ . '/../fees.php';
+$checks = 0;
+function fee_check(bool $condition, string $message): void { global $checks; $checks++; if (!$condition) throw new RuntimeException($message); }
+function fee_rejects(callable $callback, string $message): void { try { $callback(); } catch (InvalidArgumentException $e) { fee_check(true, $message); return; } fee_check(false, $message); }
+fee_check(af_fee_cents('1.05') === 105, 'Money must use exact cents');
+fee_check(af_fee_cents('0') === 0, 'Free fee must remain distinct from unconfigured');
+fee_check(af_fee_cents('') === null, 'Blank fee must not be treated as free');
+foreach (['-1','1.001','1e3','NaN','1000000'] as $bad) fee_rejects(fn()=>af_fee_cents($bad), 'Reject invalid amount');
+$policy = af_fee_policy([]);
+fee_rejects(fn()=>af_estimate_fee($policy,'electronics','2026-10-01','2026-10-02'), 'Hidden billing must block estimates');
+$policy['visible'] = true;
+fee_rejects(fn()=>af_estimate_fee($policy,'electronics','2026-10-01','2026-10-02'), 'Missing rates must block estimate');
+$policy['rates']['electronics'] = ['handling_cents'=>1050,'daily_cents'=>125,'free_days'=>2];
+$policy['rates']['documents'] = ['handling_cents'=>0,'daily_cents'=>0,'free_days'=>0];
+$estimate = af_estimate_fee($policy,'electronics','2026-10-01','2026-10-06');
+fee_check($estimate['elapsed_days'] === 5 && $estimate['billable_days'] === 3 && $estimate['total_cents'] === 1425, 'Handling plus billable storage');
+fee_check(af_estimate_fee($policy,'electronics','2026-10-01','2026-10-01')['total_cents'] === 1050, 'Same-day handling only');
+fee_check(af_estimate_fee($policy,'documents','2026-10-01','2026-10-06')['total_cents'] === 0, 'Category-specific free service');
+fee_check(af_estimate_fee($policy,'electronics','2026-10-24','2026-10-26')['elapsed_days'] === 2, 'DST must not affect calendar days');
+fee_check(af_estimate_fee($policy,'electronics','2028-02-28','2028-03-01')['elapsed_days'] === 2, 'Leap-day calculation');
+fee_rejects(fn()=>af_estimate_fee($policy,'electronics','2026-02-30','2026-03-01'), 'Reject invalid calendar date');
+fee_rejects(fn()=>af_estimate_fee($policy,'electronics','2026-10-02','2026-10-01'), 'Reject negative duration');
+fee_rejects(fn()=>af_estimate_fee($policy,'unknown','2026-10-01','2026-10-02'), 'Reject unknown category');
+fee_rejects(fn()=>af_fee_policy_from_input(['currency'=>'EUR','free_days'=>['documents'=>'-1']]), 'Reject negative free days');
+fee_rejects(fn()=>af_fee_policy_from_input(['currency'=>'XXX']), 'Reject unsupported currency');
+fee_check(af_fee_category('iPhone') === 'phones', 'Electronics detection');
+fee_check(af_fee_category('Passport') === 'documents', 'Document detection');
+$policy['rates']['electronics']['period_days'] = 7;
+fee_check(af_estimate_fee($policy,'electronics','2026-10-01','2026-10-06')['total_cents'] === 1175, 'Part week counts as one started period after free days');
+fee_check(af_estimate_fee($policy,'electronics','2026-10-01','2026-10-10')['billable_periods'] === 1, 'Exact weekly boundary');
+fee_check(af_estimate_fee($policy,'electronics','2026-10-01','2026-10-11')['billable_periods'] === 2, 'Next started week');
+$policy['rates']['electronics']['period_days'] = 30;
+fee_check(af_estimate_fee($policy,'electronics','2026-10-01','2026-11-03')['billable_periods'] === 2, '30-day periods differ from calendar months');
+$hidden_policy = af_fee_policy_from_input(['billing_visibility'=>'hidden'], $policy);
+fee_check(!$hidden_policy['visible'] && $hidden_policy['rates']['electronics'] == $policy['rates']['electronics'], 'Hiding billing preserves rates');
+$shown_policy = af_fee_policy_from_input(['billing_visibility'=>'visible'], $hidden_policy);
+fee_check($shown_policy['visible'] && $shown_policy['rates']['electronics'] == $policy['rates']['electronics'], 'Showing billing restores unchanged rates');
+echo "Fee checks passed ($checks assertions).\n";

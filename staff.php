@@ -1,6 +1,9 @@
 <?php
 require_once __DIR__ . '/bootstrap.php';
+require_once __DIR__ . '/references.php';
 require_once __DIR__ . '/mailer.php';
+require_once __DIR__ . '/fees.php';
+require_once __DIR__ . '/matching.php';
 af_security_headers();
 af_start_secure_session();
 
@@ -29,6 +32,42 @@ function normalize_tag($tag)
     }
 
     return $tag;
+}
+
+/** Small airline mark using the existing airline directory, with no guessed logo URLs. */
+function af_staff_item_airline_logo(array $record, array $airlines): string
+{
+    $explicit = trim((string) ($record['airline'] ?? ''));
+    $flight = trim((string) ($record['other_info'] ?? $record['flight_number'] ?? ''));
+    $tag = trim((string) ($record['tag_no'] ?? ''));
+    $matched = null;
+    foreach ($airlines as $airline) {
+        $code = trim((string) ($airline['code'] ?? ''));
+        $name = trim((string) ($airline['name'] ?? ''));
+        if ($explicit !== '' && (($code !== '' && strcasecmp($explicit, $code) === 0)
+            || ($name !== '' && strcasecmp($explicit, $name) === 0))) {
+            $matched = $airline;
+            break;
+        }
+    }
+    if (!$matched) {
+        foreach ($airlines as $airline) {
+            $code = trim((string) ($airline['code'] ?? ''));
+            if ($code !== '' && (preg_match('/(?<![A-Z0-9])' . preg_quote($code, '/') . '\s*-?\s*\d{1,4}(?!\d)/i', $flight)
+                || preg_match('/\bAirline:\s*' . preg_quote($code, '/') . '\b/i', $flight)
+                || preg_match('/^' . preg_quote($code, '/') . '[- ]?\d/i', $tag))) {
+                $matched = $airline;
+                break;
+            }
+        }
+    }
+    if (!$matched) return '';
+    $logo = af_valid_url_or_path((string) ($matched['logo'] ?? ''));
+    if ($logo === '') return '';
+    $label = af_h((string) ($matched['name'] ?: $matched['code']));
+    return '<img src="' . af_h($logo) . '" alt="' . $label . '" title="' . $label
+        . '" width="16" height="16" class="staff-item-airline-logo" loading="lazy" decoding="async"'
+        . ' style="display:inline-block;width:16px;height:16px;object-fit:contain;background:#fff;border:1px solid var(--border);border-radius:4px;padding:1px;vertical-align:middle;flex-shrink:0" onerror="this.hidden=true;this.style.display=\'none\'">';
 }
 
 function find_existing_item_tag(PDO $pdo, $tag)
@@ -206,52 +245,12 @@ function af_verify_pickup_otp(string $tag, string $staff_name, string $staff_ema
 
 function next_item_tag(PDO $pdo)
 {
-    $stmt = $pdo->query("
-        SELECT tag_no
-        FROM (
-            SELECT tag_no FROM items WHERE tag_no GLOB 'ID-[0-9]*'
-            UNION ALL
-            SELECT tag_no FROM pending_reports WHERE tag_no GLOB 'ID-[0-9]*'
-        )
-        ORDER BY CAST(substr(tag_no, 4) AS INTEGER) ASC
-    ");
-    $occupied = [];
-    $width = 4;
-    foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $tag_no) {
-        if (preg_match('/^ID-(\d+)/i', (string) $tag_no, $matches)) {
-            $number = (int) $matches[1];
-            if ($number > 0) {
-                $occupied[$number] = true;
-                $width = max($width, strlen($matches[1]));
-            }
-        }
-    }
-
-    $next_num = 1;
-    while (isset($occupied[$next_num])) {
-        $next_num++;
-    }
-
-    return 'ID-' . str_pad((string) $next_num, max(4, $width), '0', STR_PAD_LEFT);
+    return af_next_reference_tag($pdo, 'ID');
 }
 
 function next_passport_tag(PDO $pdo)
 {
-    $stmt = $pdo->query("
-        SELECT tag_no
-        FROM items
-        WHERE tag_no GLOB 'PP-[0-9]*'
-        ORDER BY CAST(substr(tag_no, 4) AS INTEGER) DESC
-        LIMIT 1
-    ");
-    $last_tag = $stmt->fetchColumn();
-    if (!$last_tag || !preg_match('/^PP-(\d+)/i', $last_tag, $matches)) {
-        return 'PP-0001';
-    }
-
-    $width = strlen($matches[1]);
-    $next_num = ((int) $matches[1]) + 1;
-    return 'PP-' . str_pad((string) $next_num, max(4, $width), '0', STR_PAD_LEFT);
+    return af_next_reference_tag($pdo, 'PP');
 }
 
 function remove_claim_request_notes($notes)
@@ -903,6 +902,40 @@ if (isset($_SESSION['cabin_staff_loggedin']) && $_SESSION['cabin_staff_loggedin'
 
     if (isset($_POST['action'])) {
         af_verify_csrf();
+        if ($_POST['action'] === 'estimate_fee') {
+            header('Content-Type: application/json');
+            try {
+                $tag = normalize_tag($_POST['tag_no'] ?? '');
+                $stmt = $pdo->prepare("SELECT status, item_description, created_at FROM items WHERE tag_no = ?");
+                $stmt->execute([$tag]);
+                $fee_item = $stmt->fetch(PDO::FETCH_ASSOC);
+                if (!$fee_item || !in_array($fee_item['status'], ['Found', 'Claimed'], true)) {
+                    throw new InvalidArgumentException('Select an item currently found or awaiting collection. Lost reports and closed items are not charged.');
+                }
+                $category = trim((string) ($_POST['category'] ?? '')) ?: af_fee_category($fee_item['item_description'] ?? '');
+                $estimate = af_estimate_fee(af_fee_policy($db_settings), $category,
+                    substr((string) $fee_item['created_at'], 0, 10), (string) ($_POST['handover_date'] ?? ''));
+                echo json_encode(['success' => true, 'estimate' => $estimate]);
+            } catch (InvalidArgumentException $error) {
+                http_response_code(422);
+                echo json_encode(['success' => false, 'error' => $error->getMessage()]);
+            }
+            exit;
+        }
+        if ($_POST['action'] === 'save_fee_policy') {
+            if (!$is_admin) {
+                http_response_code(403);
+                exit('Only administrators can change station fee rules.');
+            }
+            try {
+                $policy = af_fee_policy_from_input($_POST, af_fee_policy($db_settings));
+                af_setting($pdo, 'handover_fee_policy', json_encode($policy));
+                af_audit_log($pdo, 'fee_policy_updated', 'settings', 'handover_fee_policy', current_staff_label(), $policy);
+                $success_msg = 'Station fee rules saved. Estimates will use the new rates.';
+            } catch (InvalidArgumentException $error) {
+                $login_error = $error->getMessage();
+            }
+        }
         if ($_POST['action'] === 'send_pickup_otp') {
             header('Content-Type: application/json');
             $tag = normalize_tag($_POST['tag_no'] ?? '');
@@ -2016,7 +2049,8 @@ if (!isset($_SESSION['cabin_staff_loggedin']) || $_SESSION['cabin_staff_loggedin
                 font-family: 'Inter', sans-serif;
                 background: var(--bg);
             }
-        </style>
+
+    </style>
     </head>
 
     <body class="bg-[#0f172a] text-white flex items-center justify-center min-h-screen p-6">
@@ -2125,6 +2159,8 @@ $delivered = $pdo->query("SELECT COUNT(*) FROM items WHERE status = 'Delivered' 
 $id_passports = $pdo->query("SELECT COUNT(*) FROM items WHERE tag_no LIKE 'PP-%'")->fetchColumn();
 $pending_report_count = $pdo->query("SELECT COUNT(*) FROM pending_reports WHERE status = 'Pending'")->fetchColumn();
 $pending_reports = $pdo->query("SELECT * FROM pending_reports WHERE status = 'Pending' ORDER BY created_at DESC LIMIT 100")->fetchAll(PDO::FETCH_ASSOC);
+// Load once for the pending queue, rather than querying inventory per report.
+$pending_match_candidates = $pending_reports ? af_match_candidates($pdo) : [];
 
 // Pagination settings
 if (!isset($items_per_page)) {
@@ -3026,6 +3062,45 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 padding: 0 !important;
             }
 
+            /* Keep identification readable while the rest of the card is collapsed. */
+            .staff-inventory-table tr:not(.is-expanded) .staff-item-reference-row {
+                gap: 6px;
+                line-height: 1.4;
+                margin-bottom: 3px;
+            }
+            .staff-inventory-table tr:not(.is-expanded) .staff-item-id,
+            .staff-pending-table tr:not(.is-expanded) .pending-item-reference {
+                font-size: 11px;
+                letter-spacing: 0.3px;
+                color: var(--text);
+            }
+            .staff-inventory-table tr:not(.is-expanded) .staff-item-airline-logo,
+            .staff-pending-table tr:not(.is-expanded) .staff-item-airline-logo {
+                width: 22px !important;
+                height: 22px !important;
+                padding: 2px !important;
+            }
+            .staff-inventory-table tr:not(.is-expanded) .mobile-flight-badge {
+                font-size: 10px;
+                line-height: 1.4;
+                letter-spacing: 0.2px;
+                color: #be123c;
+                background: rgba(244, 63, 94, 0.12);
+                padding: 2px 6px;
+            }
+            .dark .staff-inventory-table tr:not(.is-expanded) .mobile-flight-badge {
+                color: #fda4af;
+                background: rgba(244, 63, 94, 0.18);
+            }
+            .staff-pending-table tr:not(.is-expanded) .pending-item-reference {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                line-height: 1.4;
+                margin-bottom: 3px;
+            }
+
+
             /* Collapsed view hides the Change Photo button under the thumbnail */
             .staff-inventory-table tbody tr:not(.week-row):not(.is-expanded) td[data-label="Item"] .change-photo-label {
                 display: none !important;
@@ -3210,6 +3285,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             .staff-pending-table tbody tr:not(.pending-empty-row):not(.is-expanded) td[data-label="Item"] {
                 padding: 0 !important;
+                border-top: 0;
             }
 
             .staff-pending-table tbody tr:not(.pending-empty-row).is-expanded {
@@ -3223,7 +3299,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 border: 0;
             }
 
-            .staff-pending-table tbody tr:not(.pending-empty-row) td+td {
+            .staff-pending-table tbody tr:not(.pending-empty-row).is-expanded td+td {
                 border-top: 1px solid var(--border);
             }
 
@@ -3439,6 +3515,492 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             });
         });
     </script>
+
+    <style>
+        #inventory-empty-state { padding:32px 16px; text-align:center; color:var(--secondary); }
+        #inventory-empty-state svg { margin:0 auto 12px; }
+        #inventory-empty-state h3 { font-size:15px; font-weight:800; color:var(--text); }
+        #inventory-empty-state p { font-size:12px; margin:7px 0 12px; }
+        #inventory-empty-state a { display:inline-block; padding:8px 12px; border-radius:7px; background:rgba(244,63,94,.1); color:#be123c; font-size:11px; font-weight:700; }
+        .staff-inventory-table .staff-item-id { display:inline-block; padding:2px 6px; border-radius:4px; font-size:11px; font-weight:800; letter-spacing:.3px; line-height:1.4; color:var(--text); background:rgba(59,130,246,.14); }
+        .dark .staff-inventory-table .staff-item-id { background:rgba(59,130,246,.25); }
+        .staff-inventory-table .staff-item-reference-row { gap:6px; line-height:1.4; margin-bottom:3px; }
+        .staff-inventory-table .mobile-flight-badge { font-size:10px; line-height:1.4; letter-spacing:.2px; padding:2px 6px; color:#be123c; background:rgba(244,63,94,.12); }
+        .dark .staff-inventory-table .mobile-flight-badge { color:#fda4af; background:rgba(244,63,94,.18); }
+        .dark #inventory-empty-state a { color:#fda4af; }
+        #inventory-filters { margin-bottom:18px; border:1px solid var(--border); border-radius:14px; background:var(--card); overflow:hidden; }
+        #inventory-filters > summary { display:flex; align-items:center; justify-content:space-between; padding:16px 18px; cursor:pointer; }
+        .inventory-filter-heading { display:flex; align-items:center; gap:11px; }
+        .inventory-filter-icon { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:9px; background:rgba(244,63,94,.1); color:#e11d48; font-size:23px; line-height:1; }
+        .inventory-filter-heading strong { display:block; font-size:13px; font-weight:800; color:var(--text); }
+        .inventory-filter-heading small { display:block; margin-top:3px; font-size:11px; color:var(--secondary); }
+        #inventory-filters .filter-chevron { font-size:20px; color:var(--secondary); }
+        .inventory-filter-form { padding:0 18px 16px; }
+        .inventory-filter-primary { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:12px; }
+        .inventory-filter-dates { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:12px; margin-top:13px; }
+        .inventory-filter-field { min-width:0; display:block; }
+        .inventory-filter-field > span { display:block; margin-bottom:6px; color:var(--secondary); font-size:10px; font-weight:700; }
+        #inventory-filters input:not([type="hidden"]), #inventory-filters select { display:block; width:100%; min-width:0; height:40px; padding:9px 11px; font-size:12px; color:var(--text); border:1px solid var(--border); border-radius:9px; background:var(--input); }
+        #inventory-filters input::placeholder { color:var(--secondary); opacity:1; }
+        #inventory-filters :is(input,select,a,button):focus-visible { outline:2px solid #f43f5e!important; outline-offset:2px; }
+        .inventory-filter-footer { display:flex; align-items:center; justify-content:space-between; gap:14px; margin-top:17px; padding-top:14px; border-top:1px solid var(--border); }
+        .inventory-filter-statuses { display:flex; gap:4px; padding:4px; background:var(--input); border:1px solid var(--border); border-radius:10px; }
+        .inventory-filter-statuses a { display:block; padding:7px 16px; border-radius:7px; font-size:11px; font-weight:700; color:var(--secondary); text-align:center; }
+        .inventory-filter-statuses a[aria-current] { background:#f43f5e; color:white; box-shadow:0 2px 5px rgba(244,63,94,.18); }
+        .inventory-filter-actions { display:flex; align-items:center; gap:14px; }
+        .inventory-filter-clear { font-size:11px; font-weight:700; color:var(--secondary); padding:10px 4px; }
+        .inventory-filter-actions button { display:flex; align-items:center; gap:14px; padding:11px 16px; border-radius:9px; background:#f43f5e; color:white; font-size:11px; font-weight:800; }
+        .inventory-filter-actions button:hover { background:#e11d48; }
+        @media(max-width:760px) {
+            #inventory-filters > summary { padding:14px; }
+            .inventory-filter-form { padding:0 14px 14px; }
+            .inventory-filter-primary { grid-template-columns:1fr; }
+            .inventory-filter-dates { grid-template-columns:repeat(2,minmax(0,1fr)); gap:12px; }
+            .inventory-filter-footer { flex-direction:column; align-items:stretch; gap:12px; }
+            .inventory-filter-statuses { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); }
+            .inventory-filter-statuses a { padding:8px 3px; }
+            .inventory-filter-actions { justify-content:space-between; }
+            .inventory-filter-actions button { justify-content:center; flex:1; }
+            .inventory-filter-clear { padding:10px 14px; }
+            .staff-inventory-table tbody tr.staff-inventory-row { margin-bottom:11px; border-color:#cbd5e1; box-shadow:0 2px 4px rgba(15,23,42,.06); }
+            .dark .staff-inventory-table tbody tr.staff-inventory-row { border-color:#475569; box-shadow:0 2px 5px rgba(0,0,0,.2); }
+        }
+        /* Compact filter layout across desktop and mobile widths. */
+        #inventory-filters { border-radius:11px; margin-bottom:13px; }
+        #inventory-filters > summary { padding:10px 12px; }
+        .inventory-filter-heading { gap:8px; }
+        .inventory-filter-icon { width:26px; height:26px; font-size:20px; border-radius:7px; }
+        .inventory-filter-heading strong { font-size:11px; }
+        .inventory-filter-heading small { font-size:10px; margin-top:1px; }
+        .inventory-filter-form { padding:0 12px 10px; }
+        .inventory-filter-primary { grid-template-columns:minmax(0,1.7fr) minmax(0,1fr); gap:8px; }
+        .inventory-filter-dates { gap:8px; margin-top:8px; }
+        .inventory-filter-field > span { margin-bottom:4px; font-size:9px; }
+        #inventory-filters input:not([type="hidden"]), #inventory-filters select { height:32px; padding:6px 8px; font-size:11px; border-radius:7px; }
+        .inventory-filter-footer { margin-top:10px; padding-top:9px; gap:8px; }
+        .inventory-filter-statuses { padding:3px; border-radius:8px; gap:2px; }
+        .inventory-filter-statuses a { padding:5px 11px; font-size:10px; border-radius:5px; }
+        .inventory-filter-actions { gap:9px; }
+        .inventory-filter-clear { font-size:10px; padding:7px 4px; }
+        .inventory-filter-actions button { padding:8px 12px; font-size:10px; gap:8px; border-radius:7px; }
+        @media(min-width:480px) and (max-width:760px) {
+            .inventory-filter-dates { grid-template-columns:repeat(4,minmax(0,1fr)); }
+            .inventory-filter-footer { flex-direction:row; align-items:center; }
+            .inventory-filter-statuses { display:flex; }
+            .inventory-filter-statuses a { padding:5px 9px; }
+            .inventory-filter-actions button { flex:none; }
+        }
+        @media(max-width:479px) {
+            #inventory-filters > summary { padding:10px; }
+            .inventory-filter-form { padding:0 10px 10px; }
+            .inventory-filter-footer { gap:8px; }
+            .inventory-filter-statuses a { padding:5px 3px; }
+        }
+
+        /* Expanded item cards keep the existing form bindings and save actions. */
+        @media(max-width:760px) {
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded {
+                display:grid!important; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px;
+                padding:11px!important; background:var(--card)!important; border-color:var(--border);
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded > td {
+                min-width:0; padding:8px!important; border:1px solid var(--border)!important;
+                border-radius:9px; background:var(--input);
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded > td[data-label="Item"] {
+                grid-column:1 / -1; padding:0 28px 9px 0!important; border:0!important;
+                border-bottom:1px solid var(--border)!important; border-radius:0; background:transparent;
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded > td:is([data-label="Passenger"],[data-label="Internal"],[data-label="Handover"],[data-label="Actions"]) { grid-column:1 / -1; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded > td[data-label="Status"] { grid-column:1 / -1; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded td[data-label]::before {
+                font-size:9px; line-height:1.3; letter-spacing:.7px; margin-bottom:5px; color:var(--secondary);
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded td[data-label] input,
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded td[data-label] select {
+                min-height:32px; font-size:11px!important; padding:6px 8px!important;
+                background-color:var(--card)!important; border-color:var(--border)!important;
+                border-radius:7px!important; color:var(--text);
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded .staff-item-id { font-size:12px; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded .mobile-flight-badge { font-size:11px; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded .item-photo-wrapper > img,
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded .item-photo-wrapper > div { width:36px; height:36px; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded .change-photo-label { font-size:8px; margin-top:5px; }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded td:is([data-label="Internal"],[data-label="Handover"]) > div {
+                max-height:72px; font-size:11px; line-height:1.6; padding:0 0 5px;
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row.is-expanded td[data-label="Actions"] button {
+                width:34px!important; height:34px!important; border-radius:8px!important;
+            }
+        }
+        /* A smaller quick-action rail, with a single accent for adding an item. */
+        .staff-fab { gap:8px!important; }
+        .staff-fab .staff-fab-item, .staff-fab .fab-toggle-control {
+            width:42px!important; height:42px!important; border-radius:12px!important;
+            border:1px solid var(--border); box-shadow:0 3px 10px rgba(15,23,42,.12);
+        }
+        .staff-fab .staff-fab-item { background:var(--card); color:var(--text); }
+        .staff-fab .staff-fab-item[onclick*="report-modal"] { background:#f43f5e; color:white; border-color:#f43f5e; }
+        .staff-fab:not(.collapsed) .staff-fab-item { transform:none!important; }
+        .staff-fab .staff-fab-item svg { width:19px; height:19px; }
+        .staff-fab .fab-toggle-control { background:#0f172a; color:#f8fafc; border-color:#334155; cursor:grab; }
+        .staff-fab .fab-toggle-control::before { display:none; }
+        /* Align the menus opened from quick actions with the compact staff UI. */
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) > .glass {
+            border-radius:16px; padding:20px; max-height:90dvh; overflow-y:auto;
+            background:var(--card); color:var(--text); border:1px solid var(--border);
+        }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) h2 { font-size:16px; letter-spacing:-.3px; }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) label { font-size:10px; }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) :is(input:not([type="hidden"]):not([type="file"]):not([type="checkbox"]),select,textarea) {
+            font-size:12px; min-height:35px; border-radius:8px; border:1px solid var(--border);
+            background:var(--input); color:var(--text); padding:8px 10px;
+        }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) button[type="submit"] { min-height:35px; font-size:10px; border-radius:8px; }
+        #settings-modal :is(#system-settings-toggle-btn,#station-settings-toggle-btn,#update-settings-toggle-btn,#purge-toggle-btn) {
+            padding:11px 12px; border-radius:10px; border:1px solid var(--border);
+            background:var(--input); box-shadow:none; color:var(--text);
+        }
+        #settings-modal :is(#system-settings-toggle-btn,#station-settings-toggle-btn,#update-settings-toggle-btn,#purge-toggle-btn):hover { border-color:rgba(244,63,94,.4); }
+        #settings-modal :is(#system-settings-chevron,#station-settings-chevron,#update-settings-chevron,#purge-chevron) {
+            width:25px; height:25px; border-radius:7px; background:var(--card); color:var(--secondary); border:1px solid var(--border);
+        }
+        #settings-modal :is(#system-settings-body,#station-settings-body,#update-settings-body) { margin-top:8px; }
+        #settings-modal button[type="submit"] { padding:8px 12px; font-size:10px; letter-spacing:.4px; box-shadow:none; }
+        #settings-modal .fee-settings { border-radius:10px; padding:11px; }
+
+
+        .quick-menu-title { min-width:0; padding-right:20px; }
+        .quick-menu-title h2 { margin:0; line-height:1.3; }
+        .quick-menu-title p { font-size:11px; line-height:1.5; color:var(--secondary); margin-top:4px; }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) > .glass > button:first-child {
+            top:16px; right:16px; width:28px; height:28px; border-radius:8px;
+            background:var(--input); color:var(--secondary); border:1px solid var(--border); line-height:1;
+        }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) > .glass > :is(.staff-modal-header,.flex) {
+            border-bottom:1px solid var(--border); padding-bottom:15px; margin-bottom:16px;
+        }
+        :is(#settings-modal,#report-modal,#airline-modal,#support-modal) .staff-modal-icon { width:34px; height:34px; border-radius:10px; }
+
+
+
+
+
+
+        #support-modal .space-y-4 > div, #support-modal .grid > div { border-radius:11px; padding:14px; }
+        #support-modal .space-y-4 > .grid { padding:0; }
+        #support-modal a[href^="mailto:"] { font-size:14px; }
+        #airline-modal .airline-add-form { display:grid; grid-template-columns:minmax(0,1fr) 80px auto; align-items:center; gap:8px; padding:12px; background:var(--input); border:1px solid var(--border); border-radius:11px; margin-bottom:14px; }
+        #airline-modal .airline-add-form input { width:100%; min-width:0; background:var(--card); }
+        #airline-modal .airline-add-form button { height:35px; min-height:35px; padding:8px 13px; background:#f43f5e; color:white; }
+        #airline-modal .airline-list { max-height:45dvh!important; }
+        #airline-modal .airline-list-row { padding:10px; border-radius:10px; background:var(--card); }
+        #airline-modal .airline-list-row img { width:32px!important; height:32px!important; border-radius:8px!important; }
+        #airline-modal .airline-list-row p:first-child { font-size:12px; }
+        #airline-modal .airline-list-row button { width:29px; min-height:29px; height:29px; padding:0; }
+
+        #system-settings-body > form > .grid { gap:12px; }
+        #settings-modal h3 { font-size:10px; }
+        #settings-modal label { color:var(--secondary); letter-spacing:.4px; }
+        #settings-modal input[type="file"] { font-size:10px; }
+        @media(max-width:479px) {
+            :is(#settings-modal,#report-modal,#airline-modal,#support-modal) > .glass { padding:16px; }
+            #report-modal form > .grid-cols-3, #report-modal form > div > .grid-cols-3 { grid-template-columns:repeat(2,minmax(0,1fr)); }
+            #airline-modal .airline-add-form { grid-template-columns:minmax(0,1fr) 72px; }
+            #airline-modal .airline-add-form button { grid-column:1 / -1; }
+        }
+
+        .staff-inventory-table .staff-item-date { font-size:10px; line-height:1.4; letter-spacing:.2px; font-weight:600; margin-top:5px; }
+        :is(#settings-modal,#report-modal) > .compact-dialog { padding:16px!important; border-radius:13px; max-height:90dvh; width:calc(100% - 24px); }
+        #settings-modal > .compact-dialog { max-width:740px; }
+        #report-modal > .compact-dialog { max-width:560px; }
+        :is(#settings-modal,#report-modal) .quick-menu-title h2 { font-size:15px; }
+        :is(#settings-modal,#report-modal) .quick-menu-title p { font-size:10px; margin-top:3px; }
+        :is(#settings-modal,#report-modal) > .compact-dialog > .flex { margin-bottom:12px; padding-bottom:12px; gap:9px; }
+        :is(#settings-modal,#report-modal) .compact-section { border:1px solid var(--border); border-radius:9px; background:var(--card); overflow:hidden; margin:0; }
+        :is(#settings-modal,#report-modal) .compact-section > summary { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:10px 11px; cursor:pointer; font-size:11px; font-weight:750; color:var(--text); list-style:none; }
+        :is(#settings-modal,#report-modal) .compact-section > summary::-webkit-details-marker { display:none; }
+        :is(#settings-modal,#report-modal) .compact-section > summary::after { content:''; margin-left:auto; font-size:15px; line-height:1; color:var(--secondary); }
+        :is(#settings-modal,#report-modal) .compact-section[open] > summary { border-bottom:1px solid var(--border); background:var(--input); }
+        :is(#settings-modal,#report-modal) .compact-section[open] > summary::after { content:''; transform:rotate(90deg); }
+        :is(#settings-modal,#report-modal) .compact-section small { font-size:9px; font-weight:500; color:var(--secondary); }
+        #report-modal .compact-report-form { display:grid; gap:8px; }
+        #report-modal .compact-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; padding:10px 11px; }
+        #report-modal .compact-fields > label { display:block; min-width:0; font-size:10px; line-height:1.4; font-weight:600; color:var(--secondary); text-transform:none; letter-spacing:0; margin:0; }
+        #report-modal .span-full { grid-column:1 / -1; }
+        #report-modal .compact-fields :is(input:not([type="checkbox"]),select) { display:block; width:100%; min-width:0; height:33px; min-height:33px; padding:6px 8px; margin-top:4px; border:1px solid var(--border); border-radius:6px; color:var(--text); background:var(--input); font-size:11px; }
+        #report-modal .compact-fields input[type="file"] { font-size:10px; padding:4px; overflow:hidden; }
+        #report-modal .compact-fields input[type="date"] { font-size:12px; }
+        #report-modal .compact-fields input[type="file"]::file-selector-button { border:0; border-radius:4px; padding:4px 6px; margin-right:5px; background:var(--card); color:var(--text); font-size:10px; }
+        #report-modal .compact-fields .compact-checkbox { display:flex; align-items:center; gap:8px; padding-top:3px; font-size:10px; }
+        #report-modal .compact-checkbox input[type="checkbox"] { width:14px!important; height:14px!important; min-height:14px!important; flex:0 0 14px; padding:0!important; margin:0!important; accent-color:#f43f5e; }
+        #report-modal .compact-form-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 0 0; margin:0; border:0; border-top:1px solid var(--border); border-radius:0; background:var(--card); }
+        #report-modal .compact-form-footer span { font-size:10px; color:var(--secondary); }
+        #report-modal .compact-form-footer button { padding:9px 14px; min-height:33px; background:#f43f5e; color:white; border:0; border-radius:7px; font-size:10px; font-weight:750; white-space:nowrap; }
+        #settings-modal .compact-settings-form > .grid { display:grid; grid-template-columns:1fr; gap:8px; }
+        #settings-modal .settings-section-stack { display:grid; align-content:start; gap:8px; }
+        #settings-modal .compact-settings-fields { padding:10px 11px; }
+        #settings-modal .compact-settings-fields > * + * { margin-top:9px; }
+        #settings-modal .compact-settings-fields .grid { gap:8px; }
+        #settings-modal .compact-settings-fields label { font-size:9px; line-height:1.4; letter-spacing:.1px; text-transform:none; color:var(--secondary); }
+        #settings-modal .compact-settings-fields :is(input:not([type="file"]):not([type="checkbox"]):not([type="hidden"]),select,textarea) { width:100%; min-width:0; min-height:32px; padding:6px 8px; font-size:11px; border-radius:6px; }
+        #settings-modal .compact-settings-fields input[type="file"] { max-width:100%; font-size:10px; }
+        #settings-modal .compact-settings-fields textarea { min-height:64px; resize:vertical; }
+        #settings-modal .compact-settings-fields input[type="checkbox"] { width:14px; height:14px; min-height:14px; padding:0; accent-color:#f43f5e; }
+        #settings-modal .compact-settings-fields p { line-height:1.5; }
+        #settings-modal .compact-settings-form > button[type="submit"] { margin-top:10px; width:100%; height:34px; padding:8px 12px; }
+        #settings-modal .fee-settings { padding:10px 11px; border-radius:9px; margin-bottom:8px; }
+        #settings-modal .fee-rates-scroll { max-height:230px; }
+        #settings-modal .compact-dialog :is(#system-settings-toggle-btn,#station-settings-toggle-btn,#update-settings-toggle-btn,#purge-toggle-btn) { padding:10px 11px; border-radius:9px; }
+        @media(min-width:680px) { #settings-modal .compact-settings-form > .grid { grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; } }
+        @media(max-width:420px) { #report-modal .compact-form-footer span { display:none; } #report-modal .compact-form-footer button { width:100%; } }
+
+        @media(max-width:760px) {
+            .staff-inventory-table tbody tr.staff-inventory-row:not(.is-expanded) .staff-item-date {
+                position:absolute; top:12px; right:43px; margin:0; font-size:9px; line-height:18px; letter-spacing:0; white-space:nowrap;
+            }
+            .staff-inventory-table tbody tr.staff-inventory-row:not(.is-expanded) .staff-item-reference-row { padding-right:77px; min-height:22px; }
+        }
+        #settings-modal #system-settings-body { margin-top:0; padding-top:8px; }
+        #settings-modal .fee-settings { margin:0 0 8px; }
+        #report-modal .compact-section > summary { padding:8px 10px; }
+        #report-modal .compact-fields { padding:8px 10px; gap:6px 8px; }
+        #report-modal .compact-fields > label { font-size:9px; }
+        #report-modal .compact-fields :is(input:not([type="checkbox"]),select) { height:31px; min-height:31px; margin-top:3px; }
+        #report-modal .compact-section:first-of-type .compact-fields { grid-template-columns:repeat(6,minmax(0,1fr)); }
+        #report-modal .compact-section:first-of-type .compact-fields > label { grid-column:span 3; }
+        #report-modal .compact-section:first-of-type .compact-fields > label.span-full { grid-column:1 / -1; }
+        #report-modal .compact-section:first-of-type .compact-fields > label:has([name="airline_select"]),
+        #report-modal .compact-section:first-of-type .compact-fields > label:has(#flight_num_input),
+        #report-modal .compact-section:first-of-type .compact-fields > label:has([name="comments"]) { grid-column:span 2; }
+        @media(max-width:420px) {
+            #report-modal .compact-section:first-of-type .compact-fields > label:has([name="airline_select"]) { grid-column:1 / -1; }
+            #report-modal .compact-section:first-of-type .compact-fields > label:has(#flight_num_input),
+            #report-modal .compact-section:first-of-type .compact-fields > label:has([name="comments"]) { grid-column:span 3; }
+        }
+
+        /* The same light chevron is used for every quick-action disclosure. */
+        #settings-modal :is(#system-settings-chevron,#station-settings-chevron,#update-settings-chevron,#purge-chevron) {
+            width:18px; height:18px; flex:0 0 18px; border:0; border-radius:0; background:transparent; color:var(--secondary);
+        }
+        :is(#settings-modal,#report-modal) .compact-section > summary::after,
+        #settings-modal .fee-settings > summary::after {
+            content:''; display:block; width:13px; height:13px; flex:0 0 13px; margin-left:auto;
+            background:currentColor; color:var(--secondary);
+            -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 5 7 7-7 7'/%3E%3C/svg%3E") center / contain no-repeat;
+            mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 5 7 7-7 7'/%3E%3C/svg%3E") center / contain no-repeat;
+            transition:transform .15s ease;
+        }
+        :is(#settings-modal,#report-modal) .compact-section[open] > summary::after,
+        #settings-modal .fee-settings[open] > summary::after { transform:rotate(90deg); }
+        #settings-modal .fee-settings > summary { display:flex; align-items:center; gap:8px; list-style:none; font-size:11px; font-weight:750; text-transform:none; letter-spacing:0; }
+        #settings-modal .fee-settings > summary::-webkit-details-marker { display:none; }
+        .staff-inventory-table .staff-item-date { display:inline-block; width:fit-content; padding:2px 6px; border-radius:4px; background:rgba(100,116,139,.1); color:var(--secondary); }
+        .dark .staff-inventory-table .staff-item-date { background:rgba(148,163,184,.14); }
+        @media(max-width:760px) {
+            .staff-inventory-table tbody tr.staff-inventory-row:not(.is-expanded) .staff-item-date { top:11px; padding:0 6px; }
+            .staff-inventory-table tbody tr.staff-inventory-row:not(.is-expanded) .staff-item-reference-row { padding-right:90px; }
+        }
+
+        #settings-modal #station-settings-body { padding-top:8px; margin-top:0; }
+        #settings-modal .compact-station-add, #settings-modal .compact-station-form { grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; padding:10px 11px; }
+        #settings-modal .compact-station-add { display:grid; }
+        #settings-modal .compact-station-add label { display:block; min-width:0; font-size:9px; font-weight:600; color:var(--secondary); text-transform:none; letter-spacing:0; }
+        #settings-modal .compact-station-add label :is(input,textarea) { margin-top:4px; }
+        #settings-modal .compact-station-add .span-full, #settings-modal .compact-station-form > .md\:col-span-2 { grid-column:1 / -1; }
+        #settings-modal :is(.compact-station-add,.compact-station-form) :is(input:not([type="hidden"]),textarea) { display:block; width:100%; min-width:0; min-height:32px; padding:6px 8px; font-size:11px; border:1px solid var(--border); border-radius:6px; background:var(--input); color:var(--text); }
+        #settings-modal :is(.compact-station-add,.compact-station-form) textarea { min-height:58px; resize:vertical; }
+        #settings-modal .compact-station-form label { margin-bottom:4px; font-size:9px; line-height:1.4; letter-spacing:0; text-transform:none; }
+        #settings-modal .compact-station-add button[type="submit"] { background:#f43f5e; color:white; border:0; padding:8px 12px; min-height:32px; border-radius:7px; font-size:10px; font-weight:750; }
+        #settings-modal .station-registry-card { padding:0; border-radius:9px; background:var(--card); overflow:hidden; }
+        #settings-modal .station-registry-card > .flex { padding:10px 11px; }
+        #settings-modal .station-card-toggle { gap:8px; }
+        #settings-modal .station-card-toggle [id^="station-card-chevron-"] { order:2; margin-left:auto; width:18px; height:18px; background:transparent; border:0; border-radius:0; color:var(--secondary); }
+        #settings-modal .station-card-toggle > .min-w-0 { flex:1; }
+        #settings-modal .station-card-toggle .text-sm { font-size:11px; font-weight:750; text-transform:none; letter-spacing:0; }
+        #settings-modal .station-card-toggle .text-\[8px\] { font-size:9px; text-transform:none; letter-spacing:0; }
+        #settings-modal .compact-station-form { margin-top:0; border-top:1px solid var(--border); }
+        #settings-modal .compact-station-form button[type="submit"] { grid-column:1 / -1; min-height:32px; margin-top:3px; }
+        @media(max-width:359px) { #settings-modal .compact-station-add, #settings-modal .compact-station-form { grid-template-columns:1fr; } }
+        @media(min-width:761px) {
+            .staff-inventory-table { border-spacing:0 7px; }
+            .staff-inventory-table tbody tr.staff-inventory-row td { border-top:1px solid #cbd5e1; border-bottom:1px solid #cbd5e1; }
+            .dark .staff-inventory-table tbody tr.staff-inventory-row td { border-top-color:#475569; border-bottom-color:#475569; }
+        }
+        /* Detailed record follows the compact quick-menu spacing and field styling. */
+        #row-enlarge-overlay { padding:16px; }
+        .record-panel { width:100%; max-width:720px; max-height:90dvh; display:flex; flex-direction:column; overflow:hidden; background:var(--card); color:var(--text); border:1px solid var(--border); border-radius:13px; box-shadow:0 20px 70px rgba(15,23,42,.25); }
+        .record-header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:13px 16px; border-bottom:1px solid var(--border); }
+        .record-heading { display:flex; flex-wrap:wrap; align-items:center; gap:8px; min-width:0; }
+        .record-reference { font:750 11px ui-monospace,monospace; color:#e11d48; background:rgba(244,63,94,.09); padding:4px 7px; border-radius:5px; overflow-wrap:anywhere; }
+        .dark .record-reference { color:#fda4af; }
+        .record-heading h3 { font-size:14px; font-weight:750; letter-spacing:-.25px; }
+        .record-header-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
+        #row-enlarge-mode-badge { margin:0; font-size:9px; font-weight:600; letter-spacing:0; text-transform:none; border-radius:5px; }
+        .record-close { width:29px; height:29px; display:grid; place-items:center; border:1px solid var(--border); border-radius:7px; background:var(--input); color:var(--secondary); font-size:20px; line-height:1; }
+        .record-body { overflow-y:auto; min-height:0; padding:12px 16px; display:block; }
+        .record-body > * + * { margin-top:10px; }
+        .record-section,.record-history { min-width:0; border:1px solid var(--border); border-radius:9px; overflow:hidden; }
+        .record-section-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:8px 10px; background:var(--input); border-bottom:1px solid var(--border); }
+        .record-section-heading h4 { font-size:11px; font-weight:750; line-height:1.4; }
+        .record-section-heading p,.record-subtle { font-size:10px; color:var(--secondary); line-height:1.5; }
+        .record-section-heading p { margin-top:1px; }
+        .record-overview { display:flex; align-items:flex-start; gap:10px; padding:10px; }
+        #row-enlarge-photo-container { width:88px; flex:0 0 88px; }
+        #row-enlarge-photo { width:88px; height:100px; object-fit:contain; background:var(--input); border:1px solid var(--border); border-radius:7px; cursor:zoom-in; }
+        .record-fields,.record-passenger-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px 10px; min-width:0; flex:1; }
+        .record-passenger-fields { padding:10px; }
+        .record-wide { grid-column:1 / -1; }
+        .record-field { min-width:0; }
+        .record-field > label,.record-history-editor > label { display:block; font-size:10px; font-weight:600; line-height:1.4; color:var(--secondary); margin-bottom:4px; }
+        .record-panel .modal-editable-field,.record-field select:not(.hidden) { display:block; min-height:32px; width:100%; padding:6px 8px; font-size:12px; font-weight:500; line-height:1.5; border:1px solid var(--border); background:var(--input); border-radius:6px; overflow-wrap:anywhere; outline:none; white-space:pre-wrap; }
+        .record-panel .modal-editable-field[contenteditable="false"] { background:transparent; border-color:transparent; padding-left:0; }
+        .record-panel .modal-editable-field[contenteditable="true"]:focus,.record-note-input:focus,.record-field select:focus { border-color:#f43f5e; box-shadow:0 0 0 2px rgba(244,63,94,.12); }
+        .record-panel .modal-editable-field[contenteditable="true"] { cursor:text; }
+        .record-field .record-date { display:flex; align-items:center; min-height:32px; font-size:11px; color:var(--secondary); line-height:1.5; }
+        .record-histories { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; gap:10px; }
+        .record-text-button { display:inline-flex; align-items:center; gap:4px; color:#e11d48; font-size:10px; font-weight:650; white-space:nowrap; padding:4px 0; }
+        .dark .record-text-button { display:inline-flex; align-items:center; gap:4px; color:#fda4af; }
+        .record-timeline { padding:9px 10px; max-height:205px; overflow-y:auto; }
+        .record-timeline [data-note-timeline] > div:first-child { gap:5px; margin-bottom:10px; }
+        .record-timeline input[type="search"] { width:100%; flex-basis:100%; font-size:10px; min-height:29px; }
+        .record-timeline [data-note-count] { font-size:9px; }
+        .record-history > div[id^="modal-new-"] { padding:0 9px 9px; }
+        .record-note-input { width:100%; padding:7px 8px; background:var(--input); color:var(--text); border:1px solid var(--border); border-radius:6px; font-size:11px; outline:none; }
+        .record-history-editor { padding:10px; }
+        .record-history-editor textarea { width:100%; min-height:110px; padding:8px; font:10px/1.6 ui-monospace,monospace; border:1px solid var(--border); border-radius:6px; background:var(--input); resize:vertical; }
+        .record-history-editor p { font-size:9px; color:var(--secondary); margin:5px 0; }
+        .record-footer { display:flex; align-items:center; justify-content:space-between; gap:10px; flex-shrink:0; padding:10px 16px; border-top:1px solid var(--border); }
+        .record-footer > div { display:flex; gap:7px; margin-left:auto; }
+        .record-primary-button,.record-secondary-button { min-height:32px; padding:7px 12px; border-radius:6px; font-size:11px; font-weight:650; }
+        .record-primary-button { background:#f43f5e; color:white; border:1px solid #f43f5e; }
+        .record-secondary-button { background:var(--input); color:var(--text); border:1px solid var(--border); }
+        .record-panel button:hover { filter:brightness(.96); }
+        .record-panel :is(button,input,select,textarea):focus-visible { outline:2px solid #f43f5e; outline-offset:2px; }
+        @media(max-width:580px) {
+            #row-enlarge-overlay { padding:10px; }
+            .record-panel { max-height:94dvh; border-radius:11px; }
+            .record-header { padding:11px 12px; gap:6px; }
+            .record-heading { gap:5px; }
+            .record-heading h3 { font-size:12px; }
+            #row-enlarge-mode-badge { font-size:8px; padding:3px 5px; }
+            #row-enlarge-mode-badge svg { display:none; }
+            .record-body { padding:10px 12px; gap:8px; }
+            .record-histories { grid-template-columns:1fr; gap:8px; }
+            .record-passenger-fields { grid-template-columns:1fr; }
+            .record-passenger-fields .record-field { display:grid; grid-template-columns:74px minmax(0,1fr); align-items:center; gap:8px; }
+            .record-passenger-fields .record-field > label { margin:0; }
+            .record-timeline { max-height:155px; }
+            .record-section-heading .record-subtle { display:none; }
+            .record-footer { padding:9px 12px; }
+            .record-footer > .record-subtle { font-size:9px; }
+            #row-enlarge-photo-container { width:62px; flex-basis:62px; }
+            #row-enlarge-photo { width:62px; height:78px; }
+        }
+        @media(max-width:360px) { .record-passenger-fields { grid-template-columns:1fr; } .record-footer > .record-subtle { display:none; } }
+
+        /* Compact pending-review decisions: one primary action, secondary disclosures. */
+        .staff-pending-table td[data-label="Decision"] .pending-review { display:flex!important; flex-direction:column; align-items:stretch!important; gap:8px!important; text-align:left; padding:1px 0; }
+        .pending-review-bar { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+        .staff-pending-table td[data-label="Decision"] .pending-review form { display:flex!important; align-items:center; width:auto; min-width:0; gap:6px!important; margin:0; }
+        .staff-pending-table td[data-label="Decision"] .pending-review button { display:inline-flex; align-items:center; justify-content:center; gap:5px; min-height:32px; width:auto; padding:6px 9px; border-radius:6px; font-size:10px; line-height:1.4; font-weight:650; text-transform:none; letter-spacing:0; box-shadow:none; transform:none; }
+        .staff-pending-table td[data-label="Decision"] .pending-review-bar > form button { background:#f43f5e; color:white; border:1px solid #f43f5e; }
+        .staff-pending-table td[data-label="Decision"] .pending-view-button { color:var(--text); background:var(--card); border:1px solid var(--border); }
+        .pending-view-button svg { width:13px; height:13px; }
+        .pending-review-alternatives { display:flex; flex-wrap:wrap; gap:5px 12px; border-top:1px solid var(--border); padding-top:7px; }
+        .pending-review-option { flex:1 1 100%; min-width:0; }
+        .pending-review-option > summary { display:flex; align-items:center; gap:6px; font-size:10px; font-weight:600; color:var(--secondary); padding:3px 0; cursor:pointer; list-style:none; }
+        .pending-review-option > summary::-webkit-details-marker { display:none; }
+        .pending-review-option > summary::before { content:''; display:block; width:6px; height:6px; border-right:1.5px solid currentColor; border-bottom:1.5px solid currentColor; transform:rotate(-45deg); margin-right:2px; }
+        .pending-review-option[open] > summary::before { transform:rotate(45deg); }
+        .pending-review-reject > summary { color:#be123c; }
+        .dark .pending-review-reject > summary { color:#fda4af; }
+        .pending-review-option-body { padding:5px 0 4px; }
+        .pending-review-option-body p { font-size:10px; line-height:1.5; color:var(--secondary); margin-bottom:6px; }
+        .staff-pending-table td[data-label="Decision"] .pending-review-option-body form { width:100%; }
+        .staff-pending-table td[data-label="Decision"] .pending-review-option-body input { flex:1; min-width:0; width:100%; height:32px; min-height:32px; padding:6px 8px; border:1px solid var(--border); border-radius:6px!important; font-size:11px!important; color:var(--text); background:var(--card); }
+        .staff-pending-table td[data-label="Decision"] .pending-review-option-body button { flex-shrink:0; background:var(--card); color:var(--text); border:1px solid var(--border); }
+        .staff-pending-table td[data-label="Decision"] .pending-review-reject button { color:#be123c; border-color:rgba(225,29,72,.25); }
+        .dark .staff-pending-table td[data-label="Decision"] .pending-review-reject button { color:#fda4af; }
+        .pending-review :is(summary,button,input):focus-visible { outline:2px solid #f43f5e; outline-offset:2px; }
+        @media(max-width:760px) {
+            .staff-pending-table td[data-label="Decision"]::before { display:none; }
+            .staff-pending-table td[data-label="Decision"] .pending-review { padding:6px 0 2px; }
+            .staff-pending-table td[data-label="Decision"] .pending-review-bar > form { flex:0 0 auto; }
+        }
+
+        .inventory-records-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:11px 13px; border-bottom:1px solid var(--border); }
+        .inventory-records-heading h2 { font-size:12px; font-weight:750; color:var(--text); }
+        .inventory-records-heading p,.inventory-records-heading > span { color:var(--secondary); font-size:10px; margin-top:2px; }
+        .desktop-note-preview,.desktop-action-label { display:none; }
+        @media(min-width:761px) {
+            .inventory-records { background:var(--bg); }
+            .inventory-records-heading { background:var(--card); }
+            .staff-inventory-table { display:block; min-width:0!important; width:100%; border-spacing:0; table-layout:auto; }
+            .staff-inventory-table thead { display:none; }
+            .staff-inventory-table tbody { display:block; padding:0 12px 12px; }
+            .staff-inventory-table tr.week-row { display:block; border:0; background:transparent; padding:10px 1px 7px; }
+            .staff-inventory-table tr.week-row td { display:block; padding:0; color:var(--secondary); font-size:9px; letter-spacing:.7px; }
+            .staff-inventory-table tbody tr.staff-inventory-row { display:grid; grid-template-columns:repeat(12,minmax(0,1fr)); gap:10px 12px; padding:12px; margin-bottom:8px; border:1px solid var(--border); border-left:3px solid #f43f5e; border-radius:10px; background:var(--card)!important; box-shadow:0 1px 3px rgba(15,23,42,.04); cursor:default; }
+            .staff-inventory-table tbody tr.staff-inventory-row.status-lost { border-left-color:#64748b; }
+            .staff-inventory-table tbody tr.staff-inventory-row.status-claimed { border-left-color:#6366f1; }
+            .staff-inventory-table tbody tr.staff-inventory-row.status-delivered { border-left-color:#10b981; }
+            .staff-inventory-table tbody tr.staff-inventory-row.status-disposed { border-left-color:#f59e0b; }
+            .staff-inventory-table tbody tr.staff-inventory-row > td { display:block; min-width:0; width:auto; padding:0; border:0!important; text-align:left; }
+            .staff-inventory-table td[data-label]::before { content:attr(data-label); display:block; font-size:9px; font-weight:650; color:var(--secondary); letter-spacing:.2px; margin-bottom:5px; line-height:1.4; }
+            .staff-inventory-table td[data-label="Item"] { grid-column:1 / 5; grid-row:1; }
+            .staff-inventory-table td[data-label="Item"]::before { display:none; }
+            .staff-inventory-table td[data-label="Flight"] { grid-column:5 / 7; grid-row:1; }
+            .staff-inventory-table td[data-label="Seat"] { grid-column:7 / 8; grid-row:1; }
+            .staff-inventory-table td[data-label="Passenger"] { grid-column:8 / 11; grid-row:1; }
+            .staff-inventory-table td[data-label="Status"] { grid-column:11 / 13; grid-row:1; }
+            .staff-inventory-table td[data-label="Internal"] { grid-column:1 / 6; grid-row:2; }
+            .staff-inventory-table td[data-label="Handover"] { grid-column:6 / 11; grid-row:2; }
+            .staff-inventory-table td[data-label="Actions"] { grid-column:11 / 13; grid-row:2; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"],[data-label="Actions"]) { border-top:1px solid var(--border)!important; padding-top:8px!important; }
+            .staff-inventory-table td[data-label] :is(input:not([type="hidden"]):not([type="file"]),select) { min-width:0; min-height:29px; height:29px; width:100%; padding:5px 7px; border:1px solid var(--border); border-radius:6px; background:var(--input); font-size:11px; line-height:1.4; font-weight:500; color:var(--text); text-transform:none; letter-spacing:0; margin-top:0; }
+            .staff-inventory-table td[data-label="Item"] input { font-size:12px; font-weight:650; background:transparent; border-color:transparent; padding:3px 0; }
+            .staff-inventory-table td[data-label="Passenger"] input + input { margin-top:4px; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > div { display:none; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input { width:calc(64% - 4px); display:inline-block; margin-top:6px; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input:last-child { width:35%; font-size:10px; }
+            .staff-inventory-table .desktop-note-preview { display:block; font-size:11px; line-height:1.5; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+            .staff-inventory-table .staff-item-date { background:transparent; padding:0; margin-top:1px; font-size:9px; }
+            .staff-inventory-table .item-photo-wrapper > :is(img,div) { width:38px; height:38px; border-radius:7px; opacity:1; }
+            .staff-inventory-table .change-photo-label { font-size:8px; letter-spacing:0; text-transform:none; margin-top:2px; }
+            .staff-inventory-table .staff-row-actions { display:flex; flex-wrap:wrap; justify-content:flex-start; gap:5px; }
+            .staff-inventory-table .staff-row-actions button { min-width:29px; width:auto; height:29px; min-height:29px; padding:5px 7px; gap:4px; border-radius:6px; box-shadow:none; transform:none; }
+            .staff-inventory-table .desktop-action-label { display:inline; font-size:10px; font-weight:600; }
+            .staff-inventory-table .staff-row-actions button[title="Enlarge View"] { color:var(--text); background:var(--input); border:1px solid var(--border); }
+            .staff-inventory-table .staff-row-actions button[title="Delete Record"] { color:#e11d48; background:rgba(244,63,94,.06); border:1px solid rgba(244,63,94,.15); }
+            .staff-inventory-table .staff-row-actions button[title="Mark Picked Up"] { color:#059669; background:rgba(16,185,129,.08); border:1px solid rgba(16,185,129,.18); }
+            .staff-inventory-table :is(input,select,button):focus-visible { outline:2px solid #f43f5e; outline-offset:2px; }
+        }
+        @media(min-width:761px) and (max-width:1000px) {
+            .staff-inventory-table td[data-label="Item"] { grid-column:1 / 6; }
+            .staff-inventory-table td[data-label="Flight"] { grid-column:6 / 9; }
+            .staff-inventory-table td[data-label="Seat"] { grid-column:9 / 11; }
+            .staff-inventory-table td[data-label="Status"] { grid-column:11 / 13; }
+            .staff-inventory-table td[data-label="Passenger"] { grid-column:1 / 5; grid-row:2; border-top:1px solid var(--border)!important; padding-top:8px!important; }
+            .staff-inventory-table td[data-label="Internal"] { grid-column:5 / 9; }
+            .staff-inventory-table td[data-label="Handover"] { grid-column:9 / 13; }
+            .staff-inventory-table td[data-label="Actions"] { grid-column:1 / -1; grid-row:3; display:flex!important; align-items:center; gap:10px; }
+            .staff-inventory-table td[data-label="Actions"]::before { margin:0; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input { display:block; width:100%; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input:last-child { width:100%; margin-top:4px; }
+        }
+
+        @media(min-width:1001px) {
+            .staff-inventory-table td[data-label="Internal"] { grid-column:1 / 7; }
+            .staff-inventory-table td[data-label="Handover"] { grid-column:7 / 13; }
+            .staff-inventory-table td[data-label="Actions"] { grid-column:1 / -1; grid-row:3; display:flex!important; align-items:center; gap:12px; }
+            .staff-inventory-table td[data-label="Actions"]::before { margin:0; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input { width:calc(68% - 4px)!important; }
+            .staff-inventory-table td:is([data-label="Internal"],[data-label="Handover"]) > input:last-child { width:31%!important; }
+        }
+        @media(min-width:761px) { .staff-workspace { padding-right:76px; } }
+    </style>
 </head>
 
 <body class="min-h-screen transition-colors">
@@ -3458,6 +4020,9 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 </div>
             </div>
             <div class="staff-header-actions flex items-center gap-2">
+                <?php if (af_fee_policy($db_settings)['visible']): ?>
+                <button type="button" onclick="openFeeEstimator()" aria-label="Handover estimate" title="Handover fee settings and estimates" class="fee-launch px-4 py-2 rounded-xl bg-[var(--input)] border border-[var(--border)] text-sm font-bold"><span class="fee-launch-label">Handover estimate</span><span class="fee-launch-icon" aria-hidden="true">≈</span></button>
+                <?php endif; ?>
                 <button onclick="location.reload()"
                     class="w-9 h-9 flex items-center justify-center rounded-xl bg-[var(--input)] border border-[var(--border)] text-[var(--secondary)] hover:text-rose-500 transition-all group"
                     title="Refresh Dashboard">
@@ -3613,7 +4178,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     <!-- Floating Action Buttons -->
     <div class="staff-fab fixed bottom-20 right-6 md:bottom-24 md:right-10 flex flex-col gap-3 md:gap-4 z-[100]">
         <?php if ($is_admin): ?>
-            <button onclick="toggleModal('settings-modal')"
+            <button onclick="toggleModal('settings-modal')" aria-label="Admin settings" title="Admin settings"
                 class="staff-fab-item w-12 h-12 md:w-14 md:h-14 bg-slate-800 text-white rounded-2xl flex items-center justify-center shadow-2xl shadow-slate-900/40 hover:scale-110 transition-all group relative">
                 <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"
                     aria-hidden="true">
@@ -3627,7 +4192,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </button>
         <?php endif; ?>
         <?php if ($is_admin): ?>
-            <button onclick="toggleModal('support-modal')"
+            <button onclick="toggleModal('support-modal')" aria-label="Support" title="Support"
                 class="staff-fab-item w-12 h-12 md:w-14 md:h-14 bg-emerald-500 text-white rounded-2xl flex items-center justify-center shadow-2xl shadow-emerald-500/30 hover:scale-110 transition-all group relative">
                 <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" stroke-width="2.4" viewBox="0 0 24 24"
                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3640,7 +4205,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </button>
         <?php endif; ?>
         <?php if ($is_admin): ?>
-            <button onclick="toggleModal('airline-modal')"
+            <button onclick="toggleModal('airline-modal')" aria-label="Manage airlines" title="Manage airlines"
                 class="staff-fab-item w-12 h-12 md:w-14 md:h-14 bg-blue-500 text-white rounded-2xl flex items-center justify-center shadow-2xl shadow-blue-500/40 hover:scale-110 hover:rotate-12 transition-all group relative">
                 <svg class="w-5 h-5 md:w-6 md:h-6" fill="none" stroke="currentColor" stroke-width="2.3" viewBox="0 0 24 24"
                     stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -3651,7 +4216,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                     Airlines</span>
             </button>
         <?php endif; ?>
-        <button onclick="toggleModal('report-modal')"
+        <button onclick="toggleModal('report-modal')" aria-label="Add item" title="Add item"
             class="staff-fab-item w-14 h-14 md:w-16 md:h-16 bg-rose-500 text-white rounded-3xl flex items-center justify-center shadow-2xl shadow-rose-500/40 hover:scale-110 hover:-rotate-12 transition-all group relative">
             <svg class="w-6 h-6 md:w-7 md:h-7" fill="none" stroke="currentColor" stroke-width="2.6" viewBox="0 0 24 24"
                 aria-hidden="true">
@@ -3682,7 +4247,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div id="support-modal"
             class="staff-modal-shell fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] hidden justify-center">
             <div class="staff-modal-panel glass max-w-xl w-full p-6 relative animate-fade-in custom-scroll">
-                <button onclick="toggleModal('support-modal')"
+                <button onclick="toggleModal('support-modal')" aria-label="Close support"
                     class="staff-modal-close absolute top-5 right-5 text-slate-500 hover:text-white text-xl font-bold">×</button>
                 <div class="staff-modal-header flex items-center gap-3 mb-5">
                     <div
@@ -3694,7 +4259,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <line x1="12" y1="17" x2="12.01" y2="17" />
                         </svg>
                     </div>
-                    <h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Support</h2>
+                    <div class="quick-menu-title"><h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Support</h2><p>Contact details and information about this portal.</p></div>
                 </div>
                 <div class="space-y-4">
                     <div class="bg-[var(--input)] border border-[var(--border)] rounded-2xl p-4">
@@ -3723,8 +4288,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
     <div id="report-modal"
         class="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] hidden items-center justify-center p-4">
-        <div class="glass max-w-lg w-full p-6 rounded-3xl relative animate-fade-in max-h-[92vh] overflow-y-auto">
-            <button onclick="toggleModal('report-modal')"
+        <div class="compact-dialog glass max-w-lg w-full p-6 rounded-3xl relative animate-fade-in max-h-[92vh] overflow-y-auto">
+            <button onclick="toggleModal('report-modal')" aria-label="Close report"
                 class="absolute top-6 right-6 text-slate-500 hover:text-white text-xl font-bold">×</button>
             <div class="flex items-center gap-3 mb-4">
                 <div
@@ -3734,158 +4299,41 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 5v14M5 12h14" />
                     </svg>
                 </div>
-                <h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">Report New Item</h2>
+                <div class="quick-menu-title"><h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">Report New Item</h2><p>Record the item, flight and any passenger details.</p></div>
             </div>
-            <form method="POST" enctype="multipart/form-data" class="space-y-3">
+            <form method="POST" enctype="multipart/form-data" id="compact-report-form" class="compact-report-form">
                 <input type="hidden" name="action" value="add_item">
                 <input type="hidden" name="other_info" id="other_info_input">
-
-                <!-- Row 1: Identification & General Info -->
-                <div class="grid grid-cols-3 gap-3">
-                    <div class="group">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Tag
-                            Number</label>
-                        <input type="text" name="tag_no" required value="<?= $auto_tag ?>"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                            placeholder="e.g. ID-1154">
+                <details class="compact-section" open>
+                    <summary><span>Item &amp; flight</span><small>Required details</small></summary>
+                    <div class="compact-fields">
+                        <label>Reference<input type="text" name="tag_no" required value="<?= af_h($auto_tag) ?>" placeholder="ID-1154"></label>
+                        <label>Status<select name="status"><option value="Found">Found</option><option value="Lost">Lost</option></select></label>
+                        <label class="span-full">Item description<input type="text" name="item_description" required placeholder="e.g. Black phone with a leather case"></label>
+                        <label class="span-full">Airline<select name="airline_select" onchange="document.getElementById('other_info_input').value = this.value + ' ' + document.getElementById('flight_num_input').value"><option value="">Select airline</option><?php foreach ($al as $a): ?><option value="<?= af_h(strtoupper($a['code'])) ?>"><?= af_h($a['name']) ?> (<?= af_h(strtoupper($a['code'])) ?>)</option><?php endforeach; ?></select></label>
+                        <label>Flight number<input type="text" id="flight_num_input" placeholder="e.g. 352" oninput="const sel = document.querySelector('select[name=airline_select]'); document.getElementById('other_info_input').value = sel.value + ' ' + this.value"></label>
+                        <label>Seat / location<input type="text" name="comments" placeholder="e.g. 24F"></label>
+                        <label>Date recorded<input type="date" name="created_at" value="<?= date('Y-m-d') ?>"></label>
+                        <label>Photo<input type="file" name="photo" accept="image/jpeg,image/png,image/webp"></label>
                     </div>
-                    <div class="group col-span-2">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Item
-                            Description</label>
-                        <input type="text" name="item_description" required
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                            placeholder="e.g. Black iPhone 15 with leather case">
+                </details>
+                <details class="compact-section" open>
+                    <summary><span>Staff &amp; notes</span><small>Internal only</small></summary>
+                    <div class="compact-fields">
+                        <label>Staff name<input type="text" name="staff_member_name" required placeholder="Your name"></label>
+                        <label>Internal note<input type="text" name="user_comments" placeholder="Optional note"></label>
+                        <label class="compact-checkbox span-full"><input type="checkbox" id="is_id_passport" name="is_id_passport" onchange="togglePassportTag(this.checked)"><span>Identity document / passport (PP- reference)</span></label>
                     </div>
-                </div>
-
-                <!-- Row 2: Flight & Location Info -->
-                <div class="grid grid-cols-3 gap-3">
-                    <div class="group">
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Airline</label>
-                        <select name="airline_select"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all cursor-pointer"
-                            onchange="document.getElementById('other_info_input').value = this.value + ' ' + document.getElementById('flight_num_input').value">
-                            <option value="">Select Airline...</option>
-                            <?php foreach ($al as $a): ?>
-                                <option value="<?= af_h(strtoupper($a['code'])) ?>"><?= af_h($a['name']) ?>
-                                    (<?= af_h(strtoupper($a['code'])) ?>)</option>
-                            <?php endforeach; ?>
-                        </select>
+                </details>
+                <details class="compact-section">
+                    <summary><span>Passenger details</span><small>Optional</small></summary>
+                    <div class="compact-fields">
+                        <label class="span-full">Full name<input type="text" name="pax_name" placeholder="Passenger name"></label>
+                        <label>Email<input type="email" name="pax_email" placeholder="name@example.com"></label>
+                        <label>Phone<input type="tel" name="pax_contact_no" placeholder="+49 …"></label>
                     </div>
-                    <div class="group">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Flight
-                            Number</label>
-                        <input type="text" id="flight_num_input"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                            placeholder="e.g. LH123"
-                            oninput="const sel = document.querySelector('select[name=airline_select]'); document.getElementById('other_info_input').value = sel.value + ' ' + this.value">
-                    </div>
-                    <div class="group">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Seat /
-                            Location</label>
-                        <input type="text" name="comments"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                            placeholder="e.g. 24F">
-                    </div>
-                </div>
-
-                <!-- Row 3: Status, Date & Photo -->
-                <div class="grid grid-cols-3 gap-3">
-                    <div class="group">
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Status</label>
-                        <select name="status"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all cursor-pointer">
-                            <option value="Found">Found</option>
-                            <option value="Lost">Lost</option>
-                        </select>
-                    </div>
-                    <div class="group">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Date
-                            Added</label>
-                        <input type="date" name="created_at"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                            value="<?= date('Y-m-d') ?>">
-                    </div>
-                    <div class="group">
-                        <label class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Attach
-                            Photo</label>
-                        <input type="file" name="photo" accept="image/jpeg,image/png,image/webp"
-                            class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] rounded-lg px-2 py-1 text-[9px] outline-none file:mr-2 file:py-0.5 file:px-2 file:rounded-md file:border-0 file:text-[9px] file:font-black file:bg-rose-500/10 file:text-rose-500 cursor-pointer">
-                    </div>
-                </div>
-
-                <!-- Row 4: Passenger Contact Information -->
-                <div class="border-t border-[var(--border)] pt-3 mt-1.5">
-                    <p class="text-[8px] font-black uppercase tracking-widest text-rose-500 mb-2">Passenger Details
-                        (Optional)</p>
-                    <div class="grid grid-cols-3 gap-3">
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Full
-                                Name</label>
-                            <input type="text" name="pax_name"
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="John Doe">
-                        </div>
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Email
-                                Address</label>
-                            <input type="email" name="pax_email"
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="john@example.com">
-                        </div>
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Contact
-                                Number</label>
-                            <input type="text" name="pax_contact_no"
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="+1 234 5678">
-                        </div>
-                    </div>
-                </div>
-
-                <!-- Row 5: Notes -->
-                <div class="border-t border-[var(--border)] pt-3 mt-1.5">
-                    <div class="grid grid-cols-2 gap-3">
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
-                                Name</label>
-                            <input type="text" name="staff_member_name" required
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="Your name">
-                        </div>
-                        <div class="group">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-slate-500 mb-1">Staff
-                                Internal Comments</label>
-                            <input type="text" name="user_comments"
-                                class="w-full bg-[var(--input)] border border-[var(--border)] text-[var(--text)] focus:border-rose-500/50 rounded-lg px-3 py-2 text-xs outline-none transition-all"
-                                placeholder="e.g. Found near seat belt slot">
-                        </div>
-                    </div>
-                </div>
-
-                <!-- ID/Passport Toggle Checkbox -->
-                <div class="flex items-center gap-2 mt-2">
-                    <input type="checkbox" id="is_id_passport" name="is_id_passport"
-                        class="w-3.5 h-3.5 rounded text-rose-500 bg-slate-900 border-slate-700 focus:ring-rose-500 cursor-pointer transition-all"
-                        onchange="togglePassportTag(this.checked)">
-
-                    <label for="is_id_passport"
-                        class="text-[8px] font-black uppercase tracking-widest text-slate-400 hover:text-slate-700 dark:hover:text-white cursor-pointer select-none transition-colors">
-                        Identity Document / Passport (PP- Prefix)
-                    </label>
-                </div>
-
-                <button type="submit"
-                    class="w-full bg-rose-500 hover:bg-rose-600 text-white py-2.5 rounded-xl font-black text-[9px] uppercase tracking-[0.25em] mt-3 shadow-lg shadow-rose-500/20 hover:shadow-rose-500/30 transition-all hover:scale-[1.01]">
-                    Publish Record
-                </button>
+                </details>
+                <div class="compact-form-footer"><span>Review the details before saving.</span><button type="submit">Publish record</button></div>
             </form>
         </div>
     </div>
@@ -3894,7 +4342,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div id="airline-modal"
             class="staff-modal-shell fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] hidden justify-center">
             <div class="staff-modal-panel glass max-w-xl w-full p-6 relative animate-fade-in custom-scroll">
-                <button onclick="toggleModal('airline-modal')"
+                <button onclick="toggleModal('airline-modal')" aria-label="Close airline"
                     class="staff-modal-close absolute top-5 right-5 text-slate-500 hover:text-white text-xl font-bold">×</button>
                 <div class="staff-modal-header flex items-center gap-3 mb-5">
                     <div
@@ -3905,7 +4353,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </svg>
                     </div>
                     <div class="min-w-0">
-                        <h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Airline Management</h2>
+                        <div class="quick-menu-title"><h2 class="staff-modal-title font-black text-xl uppercase tracking-tight">Airline Management</h2><p>Manage airline names, codes and branding.</p></div>
                         <p class="text-[9px] font-black uppercase tracking-widest text-[var(--secondary)] mt-1">
                             <?= af_h(af_get_current_station()) ?> -
                             <?= af_h(af_stations()[af_get_current_station()] ?? af_get_current_station()) ?>
@@ -3914,9 +4362,9 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 </div>
                 <form method="POST" class="airline-add-form flex gap-2 mb-5">
                     <input type="hidden" name="action" value="add_airline">
-                    <input type="text" name="airline_name" required placeholder="Name (e.g. Emirates)"
+                    <input type="text" name="airline_name" aria-label="Airline name" required placeholder="Airline name"
                         class="staff-modal-field flex-grow input-dark text-sm">
-                    <input type="text" name="airline_code" required placeholder="Code"
+                    <input type="text" name="airline_code" aria-label="Airline code" required placeholder="Code"
                         class="staff-modal-field w-24 input-dark text-sm">
                     <button type="submit"
                         class="bg-blue-500 hover:bg-blue-600 text-white px-5 rounded-xl font-black text-[9px] uppercase tracking-widest transition-all">Add</button>
@@ -3956,8 +4404,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
     <?php if ($is_admin): ?>
         <div id="settings-modal"
             class="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] hidden items-center justify-center p-4">
-            <div class="glass max-w-3xl w-full p-6 rounded-3xl relative animate-fade-in max-h-[92vh] overflow-y-auto">
-                <button onclick="toggleModal('settings-modal')"
+            <div class="compact-dialog glass max-w-3xl w-full p-6 rounded-3xl relative animate-fade-in max-h-[92vh] overflow-y-auto">
+                <button onclick="toggleModal('settings-modal')" aria-label="Close settings"
                     class="absolute top-6 right-6 text-slate-500 hover:text-white text-xl font-bold">×</button>
                 <div class="flex items-center gap-3 mb-4">
                     <div
@@ -3969,10 +4417,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             <path stroke-linecap="round" stroke-linejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                         </svg>
                     </div>
-                    <h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">System & Email Settings</h2>
+                    <div class="quick-menu-title"><h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">System & Email Settings</h2><p>Station, billing, branding and account preferences.</p></div>
                 </div>
                 <button type="button" onclick="toggleSettingsSection('system-settings-body', 'system-settings-chevron')"
-                    id="system-settings-toggle-btn"
+                    id="system-settings-toggle-btn" aria-controls="system-settings-body" aria-expanded="false"
                     class="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[var(--input)] border border-[var(--border)] hover:border-rose-500/30 hover:bg-rose-500/5 shadow-sm transition-all group">
                     <div class="flex items-center gap-3 min-w-0">
                         <div
@@ -3993,18 +4441,16 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                         </div>
                     </div>
                     <span id="system-settings-chevron"
-                        class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200">▶</span>
+                        class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
                 </button>
                 <div id="system-settings-body" style="display:none" class="pt-2">
-                    <form method="POST" class="space-y-4" enctype="multipart/form-data">
+                    <?php require __DIR__ . '/staff_fee_settings.php'; ?>
+                    <form method="POST" id="compact-settings-form" class="compact-settings-form" enctype="multipart/form-data">
                         <input type="hidden" name="action" value="update_settings">
 
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <!-- Column 1: System settings -->
-                            <div class="space-y-3">
-                                <h3
-                                    class="text-[9px] font-black uppercase tracking-widest text-rose-500 border-b border-[var(--border)] pb-1 mb-2">
-                                    System Config</h3>
+                            <div class="settings-section-stack"><details class="compact-section"><summary><span>Portal & accounts</span></summary><div class="compact-settings-fields">
 
                                 <div class="grid grid-cols-2 gap-3">
                                     <div class="group">
@@ -4108,10 +4554,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         Placeholder support contact for release builds. Edit this before handoff.</p>
                                 </div>
 
-                                <div class="border-b border-[var(--border)] pb-1 pt-2 mb-2">
-                                    <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">Legal /
-                                        Ground Handler Details</h3>
-                                </div>
+                                </div></details><details class="compact-section"><summary><span>Legal & privacy</span></summary><div class="compact-settings-fields">
 
                                 <div class="grid grid-cols-2 gap-3">
                                     <div class="group">
@@ -4294,14 +4737,10 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         Controls the passenger terminal card grid on phones.</p>
                                 </div>
 
-                            </div>
+                            </div></details></div>
 
                             <!-- Column 2: SMTP server configuration -->
-                            <div class="space-y-3">
-                                <div class="border-b border-[var(--border)] pb-1 mb-2">
-                                    <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">Admin /
-                                        Station Staff Updates</h3>
-                                </div>
+                            <div class="settings-section-stack"><details class="compact-section"><summary><span>Staff notifications</span></summary><div class="compact-settings-fields">
                                 <div class="grid grid-cols-1 gap-3">
                                     <div class="group">
                                         <label
@@ -4349,7 +4788,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     </label>
                                 </div>
 
-                                <div class="flex justify-between items-center border-b border-[var(--border)] pb-1 mb-2">
+                                </div></details><details class="compact-section"><summary><span>Email delivery</span></summary><div class="compact-settings-fields"><div class="flex justify-between items-center border-b border-[var(--border)] pb-1 mb-2">
                                     <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">SMTP Mail
                                         Server
                                         (Optional)</h3>
@@ -4439,7 +4878,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     class="text-[8px] text-slate-400 dark:text-slate-500 uppercase font-black text-center mt-3">
                                     Leave
                                     SMTP Host blank to default to standard server PHP mail() delivery.</p>
-                            </div>
+                            </div></details></div>
                         </div>
 
                         <button type="submit"
@@ -4452,7 +4891,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 <div class="mt-3 space-y-3">
                     <button type="button"
                         onclick="toggleSettingsSection('station-settings-body', 'station-settings-chevron')"
-                        id="station-settings-toggle-btn"
+                        id="station-settings-toggle-btn" aria-controls="station-settings-body" aria-expanded="false"
                         class="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[var(--input)] border border-[var(--border)] hover:border-rose-500/30 hover:bg-rose-500/5 shadow-sm transition-all group">
                         <div class="flex items-center gap-3 min-w-0">
                             <div
@@ -4467,43 +4906,30 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             </div>
                         </div>
                         <span id="station-settings-chevron"
-                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200">▶</span>
+                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
                     </button>
                     <div id="station-settings-body" style="display:none" class="space-y-3 pt-1">
                         <div>
                             <h3 class="text-[9px] font-black uppercase tracking-widest text-rose-500">Station Registry</h3>
                             <p class="text-[8px] text-slate-500 uppercase font-black tracking-tight mt-1">
-                                Current station: <?= af_h(af_get_current_station()) ?> uses
-                                <?= af_h(basename(af_station_db_file(af_get_current_station()))) ?>
+                                Current station: <?= af_h(af_get_current_station()) ?>
                             </p>
                         </div>
 
-                        <form method="POST"
-                            class="grid grid-cols-1 md:grid-cols-[90px_1fr_auto] gap-2 bg-[var(--input)] border border-[var(--border)] rounded-2xl p-3">
-                            <input type="hidden" name="action" value="add_station">
-                            <input type="text" name="station_code" required maxlength="4" placeholder="MUC"
-                                class="input-dark rounded-lg px-3 py-2 text-xs uppercase font-black tracking-widest">
-                            <input type="text" name="station_name" required placeholder="Station name"
-                                class="input-dark rounded-lg px-3 py-2 text-xs">
-                            <button type="submit"
-                                class="bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-lg font-black text-[8px] uppercase tracking-widest transition-all">Add
-                                Station</button>
-                            <input type="email" name="station_notification_email" required
-                                class="md:col-span-3 input-dark rounded-lg px-3 py-2 text-xs"
-                                placeholder="Station staff notification email">
-                            <input type="text" name="station_staff_username" required
-                                class="input-dark rounded-lg px-3 py-2 text-xs" placeholder="Staff username">
-                            <input type="password" name="station_staff_password" required minlength="4"
-                                class="md:col-span-2 input-dark rounded-lg px-3 py-2 text-xs" placeholder="Staff password">
-                            <input type="text" name="station_supervisor_username" required
-                                class="input-dark rounded-lg px-3 py-2 text-xs" placeholder="Supervisor username">
-                            <input type="password" name="station_supervisor_password" required minlength="4"
-                                class="md:col-span-2 input-dark rounded-lg px-3 py-2 text-xs"
-                                placeholder="Supervisor password">
-                            <textarea name="station_pickup_info" required rows="2"
-                                class="md:col-span-3 input-dark rounded-lg px-3 py-2 text-xs resize-none"
-                                placeholder="Station collection desk, terminal, opening hours, ID requirements..."></textarea>
-                        </form>
+                        <details class="compact-section station-add-section"><summary><span>Add station</span></summary>
+                            <form method="POST" class="compact-station-add">
+                                <input type="hidden" name="action" value="add_station">
+                                <label>Station code<input type="text" name="station_code" required maxlength="4" placeholder="MUC"></label>
+                                <label>Station name<input type="text" name="station_name" required placeholder="Munich"></label>
+                                <label class="span-full">Notification email<input type="email" name="station_notification_email" required placeholder="staff@example.com"></label>
+                                <label>Staff username<input type="text" name="station_staff_username" required></label>
+                                <label>Staff password<input type="password" name="station_staff_password" required minlength="4" autocomplete="new-password"></label>
+                                <label>Supervisor username<input type="text" name="station_supervisor_username" required></label>
+                                <label>Supervisor password<input type="password" name="station_supervisor_password" required minlength="4" autocomplete="new-password"></label>
+                                <label class="span-full">Collection details<textarea name="station_pickup_info" required rows="2" placeholder="Desk, terminal, opening hours and collection requirements"></textarea></label>
+                                <button type="submit" class="span-full">Add station</button>
+                            </form>
+                        </details>
 
                         <div class="space-y-2 max-h-[420px] overflow-y-auto custom-scroll pr-1">
                             <?php foreach (af_stations() as $station_code => $station_name): ?>
@@ -4514,13 +4940,13 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                 $station_pickup_info = af_pickup_info($station_settings, $station_code, $station_name);
                                 $station_notification_email = $station_settings['staff_notification_email'] ?? '';
                                 ?>
-                                <div class="bg-[var(--input)] border border-[var(--border)] rounded-2xl p-3 space-y-3">
+                                <div class="station-registry-card bg-[var(--input)] border border-[var(--border)] rounded-2xl p-3 space-y-3">
                                     <div class="flex items-center justify-between gap-2">
                                         <button type="button"
                                             onclick="toggleStationCard('station-card-<?= af_h($station_code) ?>', 'station-card-chevron-<?= af_h($station_code) ?>')"
-                                            class="flex items-center gap-3 min-w-0 text-left flex-1 rounded-xl hover:bg-rose-500/5 transition-all">
+                                            aria-controls="station-card-<?= af_h($station_code) ?>" aria-expanded="false" class="station-card-toggle flex items-center gap-3 min-w-0 text-left flex-1 rounded-xl hover:bg-rose-500/5 transition-all">
                                             <span id="station-card-chevron-<?= af_h($station_code) ?>"
-                                                class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200 shrink-0">▶</span>
+                                                class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200 shrink-0"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
                                             <span class="min-w-0">
                                                 <span
                                                     class="block text-sm font-black text-[var(--text)] uppercase tracking-tight">
@@ -4544,7 +4970,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     </div>
 
                                     <form id="station-card-<?= af_h($station_code) ?>" method="POST"
-                                        class="grid grid-cols-1 md:grid-cols-2 gap-2" style="display:none">
+                                        class="compact-station-form grid grid-cols-1 md:grid-cols-2 gap-2" style="display:none">
                                         <input type="hidden" name="action" value="update_station_credentials">
                                         <input type="hidden" name="station_code" value="<?= af_h($station_code) ?>">
                                         <div class="md:col-span-2">
@@ -4617,7 +5043,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 <!-- Platform Updates -->
                 <div class="mt-3 space-y-0">
                     <button type="button" onclick="toggleSettingsSection('update-settings-body', 'update-settings-chevron')"
-                        id="update-settings-toggle-btn"
+                        id="update-settings-toggle-btn" aria-controls="update-settings-body" aria-expanded="false"
                         class="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[var(--input)] border border-[var(--border)] hover:border-rose-500/30 hover:bg-rose-500/5 shadow-sm transition-all group">
                         <div class="flex items-center gap-3 min-w-0">
                             <div
@@ -4633,7 +5059,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             </div>
                         </div>
                         <span id="update-settings-chevron"
-                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200">▶</span>
+                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-[var(--border)] text-slate-500 text-xs transition-transform duration-200"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
                     </button>
                     <div id="update-settings-body" style="display:none" class="space-y-3 pt-3 px-1">
                         <div class="grid grid-cols-1 md:grid-cols-2 gap-4 bg-[var(--input)] border border-[var(--border)] rounded-2xl p-4">
@@ -4682,7 +5108,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 <!-- Purge Records — standalone form, NOT nested inside the settings form -->
                 <div class="mt-3 space-y-0">
                     <!-- Collapsible header -->
-                    <button type="button" onclick="togglePurgeSection()" id="purge-toggle-btn"
+                    <button type="button" onclick="togglePurgeSection()" id="purge-toggle-btn" aria-controls="purge-body" aria-expanded="false"
                         class="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-[var(--input)] border border-rose-500/20 hover:border-rose-500/40 hover:bg-rose-500/5 shadow-sm transition-all group">
                         <div class="flex items-center gap-3 min-w-0">
                             <div
@@ -4702,7 +5128,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                             </div>
                         </div>
                         <span id="purge-chevron"
-                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-rose-500/20 text-slate-500 text-xs transition-transform duration-200">▶</span>
+                            class="w-7 h-7 flex items-center justify-center rounded-lg bg-[var(--card)] border border-rose-500/20 text-slate-500 text-xs transition-transform duration-200"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m9 5 7 7-7 7"/></svg></span>
                     </button>
 
                     <!-- Collapsible body — collapsed by default -->
@@ -4840,233 +5266,47 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             src="">
     </div>
 
-    <!-- Row Enlarge Modal Overlay -->
-    <div id="row-enlarge-overlay"
-        class="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[900] hidden items-end sm:items-center justify-center p-0 sm:p-4">
-        <div
-            class="bg-[var(--card)] border-t sm:border border-[var(--border)] w-full sm:max-w-md rounded-t-3xl sm:rounded-2xl shadow-2xl p-5 sm:p-6 relative flex flex-col max-h-[85vh] sm:max-h-[80vh] animate-in slide-in-from-bottom sm:zoom-in-95 duration-200">
-            <!-- Modal Header -->
-            <div class="flex items-center justify-between border-b border-[var(--border)] pb-3 mb-3 shrink-0">
-                <div>
-                    <span id="row-enlarge-tag-badge"
-                        class="px-2 py-0.5 rounded text-[10px] font-black font-mono tracking-wide uppercase bg-rose-500/10 text-rose-500"></span>
-                    <h3
-                        class="text-sm font-black uppercase tracking-tight text-[var(--text)] mt-1 flex items-center gap-1.5">
-                        <svg class="w-3.5 h-3.5 text-rose-500" fill="none" stroke="currentColor" stroke-width="2.5"
-                            viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7" />
-                        </svg>
-                        Detailed Record
-                    </h3>
-                    <span id="row-enlarge-mode-badge"
-                        class="inline-flex items-center gap-1 mt-2 px-2 py-0.5 rounded-full border border-[var(--border)] bg-[var(--bg)] text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]"></span>
-                </div>
-                <button onclick="closeEnlargeRow()"
-                    class="w-8 h-8 rounded-full bg-[var(--bg)] hover:bg-[var(--border)] border border-[var(--border)] flex items-center justify-center text-slate-400 hover:text-[var(--text)] transition-colors text-base font-bold">×</button>
+    <!-- Compact detailed record; field IDs retain the existing edit and save flow. -->
+    <div id="row-enlarge-overlay" role="dialog" aria-modal="true" aria-labelledby="record-panel-title" class="fixed inset-0 bg-slate-950/70 backdrop-blur-sm z-[900] hidden items-center justify-center">
+      <div class="record-panel">
+        <header class="record-header">
+          <div class="record-heading"><span id="row-enlarge-tag-badge" class="record-reference"></span><h3 id="record-panel-title">Detailed record</h3></div>
+          <div class="record-header-actions"><span id="row-enlarge-mode-badge"></span><button type="button" class="record-close" aria-label="Close detailed record" onclick="closeEnlargeRow()">×</button></div>
+        </header>
+        <div class="record-body custom-scroll">
+          <section class="record-section" aria-labelledby="record-item-heading">
+            <div class="record-section-heading"><h4 id="record-item-heading">Item & flight</h4><span class="record-subtle">Identification and status</span></div>
+            <div class="record-overview">
+              <div id="row-enlarge-photo-container" class="hidden"><img id="row-enlarge-photo" onclick="zoomImage(this.src)" src="" alt="Item photo — select to enlarge"></div>
+              <div class="record-fields">
+<div class="record-field record-wide"><label id="row-enlarge-desc-label">Description</label><p id="row-enlarge-desc" data-modal-field="item_description" aria-labelledby="row-enlarge-desc-label" class="modal-editable-field select-all"></p></div><div class="record-field "><label id="row-enlarge-flight-label">Flight</label><p id="row-enlarge-flight" data-modal-field="other_info" aria-labelledby="row-enlarge-flight-label" class="modal-editable-field select-all"></p></div><div class="record-field "><label id="row-enlarge-seat-label">Seat</label><p id="row-enlarge-seat" data-modal-field="comments" aria-labelledby="row-enlarge-seat-label" class="modal-editable-field select-all"></p></div>
+                <div class="record-field"><label for="row-enlarge-status-select">Status</label><div id="row-enlarge-status"></div><select id="row-enlarge-status-select" class="hidden"><option value="Found">Found</option><option value="Lost">Lost</option><option value="Claimed">Claimed</option><option value="Delivered">Delivered</option><option value="Disposed">Disposed</option></select></div>
+                <div class="record-field"><label>Logged</label><p id="row-enlarge-date" class="record-date"></p></div>
+              </div>
             </div>
-
-            <!-- Modal Content (Scrollable) -->
-            <div class="overflow-y-auto custom-scroll flex-grow pr-1 space-y-3">
-                <!-- Photo (if available) -->
-                <div id="row-enlarge-photo-container" class="hidden shrink-0">
-                    <img id="row-enlarge-photo"
-                        class="w-full max-h-36 object-cover rounded-xl border border-[var(--border)] shadow-sm cursor-pointer"
-                        onclick="zoomImage(this.src)" src="" alt="Item photo">
-                </div>
-
-                <!-- Fields -->
-                <div class="grid grid-cols-2 gap-3">
-                    <div class="col-span-2">
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-1">Item
-                            Description</label>
-                        <p id="row-enlarge-desc" data-modal-field="item_description"
-                            class="modal-editable-field text-xs font-bold text-[var(--text)] bg-[var(--bg)] border border-[var(--border)] p-2.5 rounded-xl min-h-[3rem] leading-relaxed select-all">
-                        </p>
-                    </div>
-
-                    <div>
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-1">Flight
-                            Number</label>
-                        <p id="row-enlarge-flight" data-modal-field="other_info"
-                            class="modal-editable-field text-xs font-black uppercase tracking-wider text-[var(--text)] bg-[var(--bg)] border border-[var(--border)] p-2 rounded-xl select-all">
-                        </p>
-                    </div>
-
-                    <div>
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-1">Seat
-                            Information</label>
-                        <p id="row-enlarge-seat" data-modal-field="comments"
-                            class="modal-editable-field text-xs font-black uppercase tracking-wider text-[var(--text)] bg-[var(--bg)] border border-[var(--border)] p-2 rounded-xl select-all">
-                        </p>
-                    </div>
-
-                    <div
-                        class="col-span-2 grid grid-cols-2 gap-3 border border-[var(--border)] rounded-xl p-3 bg-[var(--bg)]/30">
-                        <div class="col-span-2 border-b border-[var(--border)] pb-1.5 flex items-center gap-1.5">
-                            <svg class="w-3.5 h-3.5 text-rose-500" fill="none" stroke="currentColor" stroke-width="2"
-                                viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round"
-                                    d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-                            </svg>
-                            <span class="text-[9px] font-black uppercase tracking-wider text-[var(--text)]">Passenger
-                                Info</span>
-                        </div>
-                        <div>
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-0.5">Full
-                                Name</label>
-                            <p id="row-enlarge-pax-name" data-modal-field="pax_name"
-                                class="modal-editable-field text-xs font-bold text-[var(--text)] rounded-lg px-1 -mx-1 select-all">
-                            </p>
-                        </div>
-                        <div>
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-0.5">Email
-                                Address</label>
-                            <p id="row-enlarge-pax-email" data-modal-field="pax_email"
-                                class="modal-editable-field text-xs font-medium text-[var(--secondary)] rounded-lg px-1 -mx-1 truncate select-all">
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- Internal Comments & Notes Section -->
-                    <div class="col-span-2 flex flex-col gap-1">
-                        <div class="flex items-center justify-between">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">Internal
-                                Comments & Notes</label>
-                            <button id="modal-internal-edit-toggle" type="button" onclick="toggleInternalHistory()"
-                                class="inline-flex items-center gap-1.5 text-[8.5px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-600 transition-colors hidden">
-                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" stroke-width="2.5"
-                                    viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                        d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                                </svg>
-                                <span>Edit History</span>
-                            </button>
-                        </div>
-                        <!-- Scrollable Timeline of updates -->
-                        <div id="row-enlarge-internal-notes"
-                            class="text-[11px] text-[var(--text)] bg-[var(--bg)]/50 border border-[var(--border)] p-2.5 rounded-xl max-h-28 overflow-y-auto custom-scroll">
-                        </div>
-                        <!-- Append New Note Input -->
-                        <div id="modal-new-internal-container" class="hidden">
-                            <input id="modal-new-internal-note" type="text" placeholder="Add new internal note entry..."
-                                class="w-full bg-[var(--bg)] border border-[var(--border)] px-2.5 py-1.5 rounded-lg text-xs text-[var(--text)] outline-none focus:border-rose-500/50 transition-colors font-medium">
-                        </div>
-                        <!-- Full History Textarea Editor -->
-                        <div id="modal-internal-history-container"
-                            class="hidden animate-in fade-in slide-in-from-top-1 duration-150 bg-[var(--bg)]/30 border border-[var(--border)] p-2.5 rounded-xl">
-                            <div class="flex items-center justify-between mb-1.5">
-                                <span class="text-[8.5px] font-black uppercase tracking-widest text-rose-500">Edit raw
-                                    notes history log</span>
-                                <button type="button" onclick="toggleInternalHistory()"
-                                    class="text-[9px] text-[var(--secondary)] hover:text-[var(--text)] font-black uppercase">Close
-                                    Editor</button>
-                            </div>
-                            <textarea id="modal-full-internal-history" rows="3"
-                                class="w-full bg-[var(--bg)] border border-[var(--border)] p-2 rounded-lg text-[10.5px] text-[var(--text)] font-mono focus:border-rose-500 outline-none resize-none custom-scroll leading-relaxed"></textarea>
-                            <p
-                                class="text-[8px] text-[var(--secondary)] leading-relaxed mt-1.5 font-medium flex items-center gap-1">
-                                <svg class="w-3 h-3 text-[var(--secondary)]" fill="none" stroke="currentColor"
-                                    stroke-width="2.5" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <span>One entry per line. Format: <code
-                                        class="bg-[var(--bg)] px-1 py-0.5 rounded text-[8px] font-mono">YYYY-MM-DD HH:MM - Author - Message</code></span>
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- Handover Notes Section -->
-                    <div class="col-span-2 flex flex-col gap-1">
-                        <div class="flex items-center justify-between">
-                            <label
-                                class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">Handover
-                                & Delivery Log</label>
-                            <button id="modal-handover-edit-toggle" type="button" onclick="toggleHandoverHistory()"
-                                class="inline-flex items-center gap-1.5 text-[8.5px] font-black uppercase tracking-wider text-rose-500 hover:text-rose-600 transition-colors hidden">
-                                <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" stroke-width="2.5"
-                                    viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                        d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z" />
-                                </svg>
-                                <span>Edit History</span>
-                            </button>
-                        </div>
-                        <!-- Scrollable Timeline of updates -->
-                        <div id="row-enlarge-handover-notes"
-                            class="text-[11px] text-[var(--text)] bg-[var(--bg)]/50 border border-[var(--border)] p-2.5 rounded-xl max-h-28 overflow-y-auto custom-scroll">
-                        </div>
-                        <!-- Append New Note Input -->
-                        <div id="modal-new-handover-container" class="hidden">
-                            <input id="modal-new-handover-note" type="text" placeholder="Add new handover note entry..."
-                                class="w-full bg-[var(--bg)] border border-[var(--border)] px-2.5 py-1.5 rounded-lg text-xs text-[var(--text)] outline-none focus:border-rose-500/50 transition-colors font-medium">
-                        </div>
-                        <!-- Full History Textarea Editor -->
-                        <div id="modal-handover-history-container"
-                            class="hidden animate-in fade-in slide-in-from-top-1 duration-150 bg-[var(--bg)]/30 border border-[var(--border)] p-2.5 rounded-xl">
-                            <div class="flex items-center justify-between mb-1.5">
-                                <span class="text-[8.5px] font-black uppercase tracking-widest text-rose-500">Edit raw
-                                    handover history log</span>
-                                <button type="button" onclick="toggleHandoverHistory()"
-                                    class="text-[9px] text-[var(--secondary)] hover:text-[var(--text)] font-black uppercase">Close
-                                    Editor</button>
-                            </div>
-                            <textarea id="modal-full-handover-history" rows="3"
-                                class="w-full bg-[var(--bg)] border border-[var(--border)] p-2 rounded-lg text-[10.5px] text-[var(--text)] font-mono focus:border-rose-500 outline-none resize-none custom-scroll leading-relaxed"></textarea>
-                            <p
-                                class="text-[8px] text-[var(--secondary)] leading-relaxed mt-1.5 font-medium flex items-center gap-1">
-                                <svg class="w-3 h-3 text-[var(--secondary)]" fill="none" stroke="currentColor"
-                                    stroke-width="2.5" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round"
-                                        d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                </svg>
-                                <span>One entry per line. Format: <code
-                                        class="bg-[var(--bg)] px-1 py-0.5 rounded text-[8px] font-mono">YYYY-MM-DD HH:MM - Author - Message</code></span>
-                            </p>
-                        </div>
-                    </div>
-
-                    <div>
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-1">Status</label>
-                        <div id="row-enlarge-status"
-                            class="inline-block px-2.5 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest">
-                        </div>
-                        <select id="row-enlarge-status-select"
-                            class="hidden input-dark rounded-lg px-2.5 py-1.5 text-[10px] font-black uppercase tracking-widest w-full min-w-[8.5rem]">
-                            <option value="Found">Found</option>
-                            <option value="Lost">Lost</option>
-                            <option value="Claimed">Claimed</option>
-                            <option value="Delivered">Delivered</option>
-                            <option value="Disposed">Disposed</option>
-                        </select>
-                    </div>
-
-                    <div class="text-right">
-                        <label
-                            class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] mb-1">Logged
-                            Date</label>
-                        <p id="row-enlarge-date" class="text-xs font-bold text-[var(--secondary)] mt-0.5"></p>
-                    </div>
-                </div>
+          </section>
+          <section class="record-section" aria-labelledby="record-passenger-heading">
+            <div class="record-section-heading"><h4 id="record-passenger-heading">Passenger</h4><span class="record-subtle">Contact details</span></div>
+            <div class="record-passenger-fields">
+<div class="record-field "><label id="row-enlarge-pax-name-label">Full name</label><p id="row-enlarge-pax-name" data-modal-field="pax_name" aria-labelledby="row-enlarge-pax-name-label" class="modal-editable-field select-all"></p></div><div class="record-field "><label id="row-enlarge-pax-email-label">Email address</label><p id="row-enlarge-pax-email" data-modal-field="pax_email" aria-labelledby="row-enlarge-pax-email-label" class="modal-editable-field select-all"></p></div>
             </div>
-
-            <!-- Modal Footer -->
-            <div class="border-t border-[var(--border)] pt-3 mt-3 flex items-center justify-between shrink-0">
-                <button id="modal-save-btn" onclick="saveRowFromModal()"
-                    class="hidden px-4 py-1.5 bg-gradient-to-r from-rose-600 to-rose-500 hover:from-rose-500 hover:to-rose-600 text-white rounded-lg text-xs font-black uppercase tracking-widest transition-all shadow-md shadow-rose-500/10 active:scale-95 duration-100">Save
-                    Changes</button>
-                <button onclick="closeEnlargeRow()"
-                    class="px-4 py-1.5 bg-[var(--bg)] border border-[var(--border)] hover:bg-[var(--border)] text-[var(--text)] rounded-lg text-xs font-black uppercase tracking-widest transition-colors shadow-sm ml-auto">Close</button>
-            </div>
+          </section>
+          <div class="record-histories">
+<section class="record-history" aria-labelledby="record-internal-title">
+ <div class="record-section-heading"><div><h4 id="record-internal-title">Internal notes</h4><p>Staff updates and claim review</p></div><button id="modal-internal-edit-toggle" type="button" onclick="toggleInternalHistory()" class="record-text-button hidden">Edit history</button></div>
+ <div id="row-enlarge-internal-notes" class="record-timeline custom-scroll"></div>
+ <div id="modal-new-internal-container" class="hidden"><label class="sr-only" for="modal-new-internal-note">Add internal note</label><input id="modal-new-internal-note" type="text" placeholder="Add internal note…" class="record-note-input"></div>
+ <div id="modal-internal-history-container" class="record-history-editor hidden"><label for="modal-full-internal-history">Edit history entries</label><textarea id="modal-full-internal-history" rows="4"></textarea><p>YYYY-MM-DD HH:MM - Author - Message</p><button type="button" onclick="toggleInternalHistory()" class="record-text-button">Show timeline</button></div>
+ </section><section class="record-history" aria-labelledby="record-handover-title">
+ <div class="record-section-heading"><div><h4 id="record-handover-title">Handover & delivery</h4><p>Collection and return history</p></div><button id="modal-handover-edit-toggle" type="button" onclick="toggleHandoverHistory()" class="record-text-button hidden">Edit history</button></div>
+ <div id="row-enlarge-handover-notes" class="record-timeline custom-scroll"></div>
+ <div id="modal-new-handover-container" class="hidden"><label class="sr-only" for="modal-new-handover-note">Add handover note</label><input id="modal-new-handover-note" type="text" placeholder="Add handover note…" class="record-note-input"></div>
+ <div id="modal-handover-history-container" class="record-history-editor hidden"><label for="modal-full-handover-history">Edit history entries</label><textarea id="modal-full-handover-history" rows="4"></textarea><p>YYYY-MM-DD HH:MM - Author - Message</p><button type="button" onclick="toggleHandoverHistory()" class="record-text-button">Show timeline</button></div>
+ </section>
+          </div>
         </div>
+        <footer class="record-footer"><span id="record-footer-hint" class="record-subtle">Review details before saving.</span><div><button type="button" onclick="closeEnlargeRow()" class="record-secondary-button">Close</button><button type="button" id="modal-save-btn" onclick="saveRowFromModal()" class="record-primary-button hidden">Save changes</button></div></footer>
+      </div>
     </div>
 
     <script>
@@ -5274,6 +5514,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             const isOpen = body.style.display !== 'none';
             body.style.display = isOpen ? 'none' : 'block';
             chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+            document.querySelector('[aria-controls="' + body.id + '"]')?.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
         }
 
         function toggleSettingsSection(bodyId, chevronId) {
@@ -5283,6 +5524,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             const isOpen = body.style.display !== 'none';
             body.style.display = isOpen ? 'none' : 'block';
             chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+            document.querySelector('[aria-controls="' + body.id + '"]')?.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
         }
 
         function toggleStationCard(bodyId, chevronId) {
@@ -5292,6 +5534,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             const isOpen = body.style.display !== 'none';
             body.style.display = isOpen ? 'none' : 'grid';
             chevron.style.transform = isOpen ? '' : 'rotate(90deg)';
+            document.querySelector('[aria-controls="' + body.id + '"]')?.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
         }
 
         function setPurgeMethod(method) {
@@ -5416,63 +5659,43 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         const STAFF_CAN_EDIT_PAX_DETAILS = <?= $can_edit_pax_details ? 'true' : 'false' ?>;
         const STAFF_CAN_EDIT_HISTORY = <?= $is_admin ? 'true' : 'false' ?>;
 
-        function formatTimelineNotes(notesString) {
-            if (!notesString || notesString.trim() === '') {
-                return '<p class="text-[var(--secondary)] italic text-[10px] py-2 pl-2">No note entries logged yet.</p>';
-            }
-            const lines = notesString.split(/\r?\n/);
-            let html = '<div class="space-y-3 border-l border-slate-700/20 dark:border-slate-300/10 pl-3.5 ml-2.5 mt-1 relative">';
+        function escapeTimelineText(value) {
+            return String(value).replace(/[&<>"']/g, char => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[char]));
+        }
 
-            lines.forEach(line => {
-                if (line.trim() === '') return;
-
-                // Regex matches YYYY-MM-DD HH:MM - Author - Note
-                const match = line.trim().match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) - (.*?) - (.*)$/);
-                if (match) {
-                    const date = match[1];
-                    let nameVal = match[2];
-                    const text = match[3];
-
-                    let authorHtml = '';
-                    if (nameVal.includes('|')) {
-                        const parts = nameVal.split('|');
-                        const plainName = parts[0].trim();
-                        const email = parts[1] ? parts[1].trim() : '';
-                        authorHtml = `<span class="font-bold text-[var(--text)] text-[10px]">${plainName}</span>` +
-                            (email ? ` <span class="text-[9px] text-[var(--secondary)] font-normal flex-wrap">(${email})</span>` : '');
-                    } else {
-                        authorHtml = `<span class="font-bold text-[var(--text)] text-[10px]">${nameVal.trim()}</span>`;
-                    }
-
-                    let dotColor = 'bg-rose-500';
-                    if (text.toLowerCase().includes('status changed') || text.toLowerCase().includes('approved') || text.toLowerCase().includes('delivered') || text.toLowerCase().includes('claimed')) {
-                        dotColor = 'bg-emerald-500';
-                    } else if (text.toLowerCase().includes('created') || text.toLowerCase().includes('added') || text.toLowerCase().includes('logged')) {
-                        dotColor = 'bg-blue-500';
-                    }
-
-                    html += `
-                    <div class="relative pl-0.5">
-                        <!-- Timeline Dot -->
-                        <div class="absolute -left-[19.5px] top-1 w-2 h-2 rounded-full ${dotColor} border-2 border-[var(--card)]"></div>
-                        
-                        <div class="flex items-start justify-between gap-3">
-                            <p class="text-[11px] font-bold text-[var(--text)] leading-snug break-words pr-2">${text}</p>
-                            <span class="text-[9px] font-black font-mono text-[var(--secondary)] whitespace-nowrap mt-0.5">${date}</span>
-                        </div>
-                        <p class="text-[9.5px] text-[var(--secondary)] mt-0.5">by ${authorHtml}</p>
-                    </div>`;
-                } else {
-                    html += `
-                    <div class="relative pl-0.5">
-                        <div class="absolute -left-[19.5px] top-1 w-2 h-2 rounded-full bg-slate-400 border-2 border-[var(--card)]"></div>
-                        <p class="text-[11px] font-semibold text-[var(--text)] leading-snug">${line}</p>
-                    </div>`;
-                }
+        function filterTimeline(input) {
+            const panel = input.closest('[data-note-timeline]');
+            const query = input.value.trim().toLocaleLowerCase();
+            let visible = 0;
+            panel.querySelectorAll('[data-note-entry]').forEach(entry => {
+                entry.hidden = !entry.textContent.toLocaleLowerCase().includes(query);
+                if (!entry.hidden) visible++;
             });
+            panel.querySelector('[data-note-count]').textContent = `${visible} of ${panel.querySelectorAll('[data-note-entry]').length} entries`;
+            panel.querySelector('[data-note-empty]').hidden = visible !== 0;
+        }
 
-            html += '</div>';
-            return html;
+        function formatTimelineNotes(notesString) {
+            const entries = [];
+            String(notesString || '').split(/\r?\n/).forEach(line => {
+                if (!line.trim()) return;
+                const match = line.trim().match(/^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}) - (.*?) - (.*)$/);
+                if (match) entries.push({date: match[1], author: match[2], text: match[3], order: entries.length});
+                else if (entries.length && entries[entries.length - 1].date) entries[entries.length - 1].text += '\n' + line;
+                else entries.push({date: '', author: '', text: line, order: entries.length});
+            });
+            if (!entries.length) return '<p class="text-[var(--secondary)] italic text-[10px] py-2 pl-2">No note entries logged yet.</p>';
+            entries.sort((a, b) => b.date.localeCompare(a.date) || b.order - a.order);
+            let html = `<div data-note-timeline><div class="flex flex-wrap items-center gap-2 mb-3"><input type="search" aria-label="Search note history" placeholder="Search notes, staff or date" oninput="filterTimeline(this)" class="min-w-0 flex-1 bg-[var(--bg)] border border-[var(--border)] rounded px-2 py-1 text-[11px]"><span data-note-count role="status" class="text-[10px] text-[var(--secondary)]">${entries.length} ${entries.length === 1 ? 'entry' : 'entries'} · newest first</span></div><div class="space-y-3 border-l border-slate-700/20 dark:border-slate-300/10 pl-3.5 ml-2.5 mt-1 relative">`;
+            entries.forEach(entry => {
+                const text = escapeTimelineText(entry.text);
+                const parts = entry.author.split('|');
+                const author = escapeTimelineText(parts[0].trim());
+                const email = escapeTimelineText(parts.slice(1).join('|').trim());
+                const dotColor = /status changed|approved|delivered|claimed/i.test(entry.text) ? 'bg-emerald-500' : /created|added|logged/i.test(entry.text) ? 'bg-blue-500' : entry.date ? 'bg-rose-500' : 'bg-slate-400';
+                html += `<div data-note-entry class="relative pl-0.5"><div aria-hidden="true" class="absolute -left-[19.5px] top-1 w-2 h-2 rounded-full ${dotColor} border-2 border-[var(--card)]"></div><div class="flex flex-wrap items-start justify-between gap-1"><p class="text-[11px] font-bold text-[var(--text)] leading-snug break-words whitespace-pre-wrap min-w-0">${text}</p>${entry.date ? `<time class="text-[9px] font-mono text-[var(--secondary)] whitespace-nowrap" datetime="${entry.date.replace(' ', 'T')}">${entry.date}</time>` : ''}</div>${entry.author ? `<p class="text-[10px] text-[var(--secondary)] mt-0.5 break-words">by <span class="font-bold">${author}</span>${email ? ` (${email})` : ''}</p>` : ''}</div>`;
+            });
+            return html + '</div><p data-note-empty hidden class="text-[11px] text-[var(--secondary)] py-2">No matching history entries.</p></div>';
         }
 
         function toggleInternalHistory() {
@@ -5544,6 +5767,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             const statusSelect = document.getElementById('row-enlarge-status-select');
             const saveBtn = document.getElementById('modal-save-btn');
             const canEditHistory = activeModalCanEdit && STAFF_CAN_EDIT_HISTORY;
+            document.getElementById('record-footer-hint').textContent = activeModalCanEdit ? 'Review details before saving.' : 'View-only record.';
 
             modeBadge.innerHTML = activeModalCanEdit
                 ? `${SVGS.edit}<span>${label || 'Editable'}</span>`
@@ -5645,8 +5869,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 document.getElementById('row-enlarge-date').textContent = 'N/A';
             }
 
-            overlay.classList.remove('hidden');
-            overlay.classList.add('flex');
+            showEnlargeRecord(overlay);
         }
 
         function zoomPendingRow(report) {
@@ -5671,7 +5894,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             // Set fields
             document.getElementById('row-enlarge-desc').textContent = report.item_description || 'No description provided';
-            document.getElementById('row-enlarge-flight').textContent = ((report.airline || '') + ' ' + (report.flight_number || '')).trim() || 'N/A';
+            const reportFlight = (report.flight_number || '').trim();
+            document.getElementById('row-enlarge-flight').textContent = /[a-z]/i.test(reportFlight) ? reportFlight : ((report.airline || '') + ' ' + reportFlight).trim() || 'N/A';
             document.getElementById('row-enlarge-seat').textContent = report.seat_info || 'N/A';
 
             document.getElementById('row-enlarge-pax-name').textContent = report.pax_name || 'Anonymous Passenger';
@@ -5698,8 +5922,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                 document.getElementById('row-enlarge-date').textContent = 'N/A';
             }
 
-            overlay.classList.remove('hidden');
-            overlay.classList.add('flex');
+            showEnlargeRecord(overlay);
         }
 
         async function saveRowFromModal() {
@@ -5779,11 +6002,36 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             await saveRow(tagNo);
         }
 
+        let recordReturnFocus = null;
+        let recordBodyOverflow = '';
+        function showEnlargeRecord(overlay) {
+            recordReturnFocus = document.activeElement;
+            recordBodyOverflow = document.body.style.overflow;
+            overlay.classList.remove('hidden');
+            overlay.classList.add('flex');
+            document.body.style.overflow = 'hidden';
+            overlay.querySelector('.record-close').focus();
+        }
         function closeEnlargeRow() {
             const overlay = document.getElementById('row-enlarge-overlay');
             overlay.classList.remove('flex');
             overlay.classList.add('hidden');
+            document.body.style.overflow = recordBodyOverflow;
+            if (recordReturnFocus?.isConnected) recordReturnFocus.focus();
         }
+        document.getElementById('row-enlarge-overlay').addEventListener('keydown', event => {
+            if (!document.getElementById('image-zoom-overlay').classList.contains('hidden')) return;
+            if (event.key === 'Escape') {
+                event.preventDefault();
+                closeEnlargeRow();
+            }
+            if (event.key !== 'Tab') return;
+            const controls = [...event.currentTarget.querySelectorAll('button, input, select, textarea, [contenteditable="true"], a[href]')]
+                .filter(control => !control.disabled && control.getClientRects().length);
+            const first = controls[0], last = controls[controls.length - 1];
+            if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+            else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+        });
 
         function prefillIonos() {
             document.getElementsByName('email_delivery_method')[0].value = 'smtp';
@@ -5793,6 +6041,13 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
             document.getElementsByName('smtp_user')[0].focus();
         }
 
+
+        document.querySelectorAll('#compact-report-form, #compact-settings-form').forEach(form => {
+            form.addEventListener('invalid', event => {
+                let section = event.target.closest('details');
+                while (section) { section.open = true; section = section.parentElement.closest('details'); }
+            }, true);
+        });
         function toggleRowExpansion(tr, event) {
             if (window.innerWidth > 1024) return;
             if (event.target.closest('input, select, button, label, form, a, svg, img')) {
@@ -6247,7 +6502,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
         }
     </script>
 
-    <div class="max-w-7xl mx-auto px-4 pb-12">
+    <?php require __DIR__ . '/staff_fees.php'; ?>
+    <div class="staff-workspace max-w-7xl mx-auto px-4 pb-12">
         <!-- Quick Stats Grid -->
         <div
             class="flex overflow-x-auto md:grid md:grid-cols-7 gap-3 mb-6 pb-2 md:pb-0 snap-x snap-mandatory [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -6341,6 +6597,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                     onclick="toggleRowExpansion(this, event)">
                                     <td class="px-2 py-1.5" data-label="Reference">
                                         <p class="text-[10px] font-black text-amber-500 uppercase">
+                                            <?= af_staff_item_airline_logo($report, $al) ?>
                                             <?= af_h($report['tag_no'] ?: $report['report_ref']) ?>
                                         </p>
                                         <p class="text-[8px] font-bold text-[var(--secondary)] uppercase">
@@ -6356,7 +6613,8 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             <?php endif; ?>
                                             <p class="text-[10px] font-bold text-[var(--text)] leading-snug">
                                                 <span
-                                                    class="pending-mobile-meta text-[7px] font-black text-amber-500 uppercase tracking-widest mb-0.5">
+                                                    class="pending-item-reference pending-mobile-meta text-[7px] font-black text-amber-500 uppercase tracking-widest mb-0.5">
+                                                    <?= af_staff_item_airline_logo($report, $al) ?>
                                                     <?= af_h($report['tag_no'] ?: $report['report_ref']) ?>
                                                 </span>
                                                 <?= af_h($report['item_description']) ?>
@@ -6366,10 +6624,23 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                 </span>
                                             </p>
                                         </div>
+                                        <?php $report_matches = af_rank_matches($report, $pending_match_candidates); ?>
+                                        <details class="mt-2 text-[10px] text-[var(--secondary)]" onclick="event.stopPropagation()">
+                                            <summary class="cursor-pointer font-bold">Possible matches (<?= count($report_matches) ?>)</summary>
+                                            <p class="mt-1">Suggestions only. Verify ownership before linking or releasing an item.</p>
+                                            <?php foreach ($report_matches as $suggestion): ?>
+                                                <div class="mt-2 border-t border-[var(--border)] pt-1">
+                                                    <a class="font-bold text-blue-500 underline" target="_blank" rel="noopener" href="?<?= af_h(http_build_query(['station' => $active_station, 'search' => $suggestion['tag_no'], 'status_filter' => $suggestion['status']])) ?>"><?= af_h($suggestion['tag_no']) ?> · <?= af_h($suggestion['status']) ?> <span class="sr-only">(opens in a new tab)</span></a>
+                                                    <p><?= af_h($suggestion['item_description']) ?></p>
+                                                    <p><?= af_h(implode(' · ', $suggestion['match_reasons'])) ?></p>
+                                                </div>
+                                            <?php endforeach; ?>
+                                            <?php if (!$report_matches): ?><p class="mt-1">No strong matches in active inventory.</p><?php endif; ?>
+                                        </details>
                                     </td>
                                     <td class="px-2 py-1.5" data-label="Flight">
                                         <p class="text-[10px] font-black text-[var(--text)] uppercase">
-                                            <?= af_h(trim(($report['airline'] ?? '') . ' ' . ($report['flight_number'] ?? ''))) ?>
+                                            <?= af_h(af_match_flight((string) ($report['flight_number'] ?? '')) ?: trim(($report['airline'] ?? '') . ' ' . ($report['flight_number'] ?? ''))) ?>
                                         </p>
                                         <p class="text-[8px] font-bold text-[var(--secondary)] uppercase">
                                             <?= af_h($report['seat_info'] ?? '') ?>
@@ -6384,45 +6655,46 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         </p>
                                     </td>
                                     <td class="px-2 py-1.5" data-label="Decision">
-                                        <div class="pending-actions flex flex-wrap gap-1.5 items-center justify-end">
-                                            <button type="button"
+                                        <div class="pending-review" onclick="event.stopPropagation()">
+                                            <div class="pending-review-bar"><button type="button"
                                                 onclick="zoomPendingRow(<?= htmlspecialchars(json_encode($report)) ?>)"
-                                                title="Enlarge View"
-                                                class="w-7 h-7 flex items-center justify-center bg-slate-500 hover:bg-slate-600 text-white rounded-lg hover:scale-105 transition-all shadow-sm shadow-slate-500/10 shrink-0">
+                                                title="View detailed record"
+                                                class="pending-view-button">
                                                 <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5"
                                                     viewBox="0 0 24 24">
                                                     <path stroke-linecap="round" stroke-linejoin="round"
                                                         d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7" />
                                                 </svg>
-                                            </button>
-                                            <form method="POST"
+                                            <span>View record</span></button><form method="POST"
                                                 onsubmit="event.preventDefault(); const form=this; toast.confirm('Approve <?= af_h($report['tag_no'] ?: $report['report_ref']) ?> and add it to Lost reports?',()=>form.submit(),null,{title:'Approve Report',confirmText:'Approve',intent:'success'});"
                                                 class="inline-flex justify-end">
                                                 <input type="hidden" name="action" value="approve_pending_report">
                                                 <input type="hidden" name="report_id" value="<?= (int) $report['id'] ?>">
                                                 <button type="submit"
-                                                    class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Approve</button>
-                                            </form>
-                                            <form method="POST"
+                                                    class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Approve report</button>
+                                            </form></div>
+                                            <div class="pending-review-alternatives">
+                                                <details class="pending-review-option"><summary>Link existing record</summary><div class="pending-review-option-body"><p>Already recorded? Enter its reference to avoid a duplicate.</p><form method="POST"
                                                 onsubmit="event.preventDefault(); if (!this.reportValidity()) return; const form=this; toast.confirm('Mark this passenger report as already logged?',()=>form.submit(),null,{title:'Already Logged',confirmText:'Mark Logged',intent:'success'});"
                                                 class="pending-action-form flex items-center justify-end gap-1">
                                                 <input type="hidden" name="action" value="duplicate_pending_report">
                                                 <input type="hidden" name="report_id" value="<?= (int) $report['id'] ?>">
-                                                <input type="text" name="existing_tag_no" placeholder="Existing ID" required
+                                                <input type="text" name="existing_tag_no" placeholder="e.g. ID-1234" aria-label="Existing record reference" required
                                                     class="w-20 bg-[var(--bg)] border border-[var(--border)] rounded-md px-2 py-1 text-[9px] text-[var(--text)] uppercase outline-none">
                                                 <button type="submit"
-                                                    class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Logged</button>
-                                            </form>
-                                            <form method="POST"
+                                                    class="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Link record</button>
+                                            </form></div></details>
+                                                <details class="pending-review-option pending-review-reject"><summary>Reject report</summary><div class="pending-review-option-body"><p>Provide a reason before rejecting this report.</p><form method="POST"
                                                 onsubmit="event.preventDefault(); if (!this.reportValidity()) return; const form=this; toast.confirm('Reject this pending report?',()=>form.submit(),null,{title:'Reject Report',confirmText:'Reject',intent:'danger'});"
                                                 class="pending-action-form flex items-center justify-end gap-1">
                                                 <input type="hidden" name="action" value="reject_pending_report">
                                                 <input type="hidden" name="report_id" value="<?= (int) $report['id'] ?>">
-                                                <input type="text" name="staff_notes" placeholder="Reason" required
+                                                <input type="text" name="staff_notes" placeholder="Reason for rejection" aria-label="Reason for rejection" required
                                                     class="w-24 bg-[var(--bg)] border border-[var(--border)] rounded-md px-2 py-1 text-[9px] text-[var(--text)] outline-none">
                                                 <button type="submit"
-                                                    class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Reject</button>
-                                            </form>
+                                                    class="px-3 py-1.5 bg-red-600 hover:bg-red-700 text-white rounded-lg text-[8px] font-black uppercase tracking-widest">Reject report</button>
+                                            </form></div></details>
+                                            </div>
                                         </div>
                                     </td>
                                 </tr>
@@ -6435,107 +6707,62 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <!-- Inventory Control Bar -->
         <?php if ($status_f !== 'Pending'): ?>
-            <details
-                class="filter-panel bg-[var(--card)] border border-[var(--border)] rounded-xl shadow-sm p-3 mb-4 transition-colors"
-                <?= ($search || $start_date || $end_date || $filter_year || $filter_month || $status_f || $airline_filter) ? 'open' : '' ?>>
-                <summary class="flex cursor-pointer items-center justify-between gap-3">
-                    <div>
-                        <p class="text-[9px] font-black uppercase tracking-widest text-[var(--secondary)]">Filters</p>
-                        <p class="text-[11px] font-bold text-[var(--text)]">Search, dates, month, and status</p>
-                    </div>
-                    <span class="filter-chevron text-[var(--secondary)] text-lg leading-none">⌄</span>
+            <?php
+                $active_filter_count = count(array_filter([$search, $start_date, $end_date, $filter_year, $filter_month, $airline_filter], fn($value) => (string) $value !== ''));
+                $clear_filter_params = ['status_filter' => $status_f];
+                if (isset($_GET['station'])) $clear_filter_params['station'] = $active_station;
+            ?>
+            <details id="inventory-filters" class="filter-panel"
+                <?= ($active_filter_count || $status_f) ? 'open' : '' ?>>
+                <summary>
+                    <span class="inventory-filter-heading"><span class="inventory-filter-icon" aria-hidden="true">≡</span><span><strong>Filter items</strong><small><?= (int) $total_matching ?> matching <?= (int) $total_matching === 1 ? 'item' : 'items' ?><?= $active_filter_count ? ' · ' . $active_filter_count . ($active_filter_count === 1 ? ' filter applied' : ' filters applied') : '' ?></small></span></span>
+                    <span class="filter-chevron" aria-hidden="true">⌄</span>
                 </summary>
-                <form method="GET" class="mt-3 flex flex-col lg:flex-row lg:flex-nowrap gap-2.5 items-center w-full">
-                    <input type="hidden" name="status_filter" value="<?= htmlspecialchars($status_f) ?>">
-
-                    <div class="relative flex-grow w-full lg:w-48 xl:w-56 shrink-0">
-                        <svg class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--secondary)] pointer-events-none opacity-40"
-                            fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round"
-                                d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-                        </svg>
-                        <input type="text" name="search" value="<?= htmlspecialchars($search) ?>"
-                            placeholder="Search description..."
-                            class="w-full pl-10 pr-4 py-2 bg-[var(--bg)] border border-[var(--border)] rounded-lg text-xs focus:border-rose-500/50 transition-all outline-none text-[var(--text)]">
+                <form method="GET" class="inventory-filter-form">
+                    <input type="hidden" name="status_filter" value="<?= af_h($status_f) ?>">
+                    <?php if (isset($_GET['station'])): ?><input type="hidden" name="station" value="<?= af_h($active_station) ?>"><?php endif; ?>
+                    <div class="inventory-filter-primary">
+                        <label class="inventory-filter-field" for="inventory-filter-search"><span>Search</span><input id="inventory-filter-search" type="search" name="search" value="<?= af_h($search) ?>" placeholder="Search items, ID or passenger"></label>
+                        <label class="inventory-filter-field" for="inventory-filter-airline"><span>Airline</span><select id="inventory-filter-airline" name="airline_filter"><option value="">All airlines</option>
+                            <?php foreach ($al as $airline): ?><option value="<?= (int) $airline['id'] ?>" <?= (string) $airline_filter === (string) $airline['id'] ? 'selected' : '' ?>><?= af_h($airline['name']) ?> (<?= af_h($airline['code']) ?>)</option><?php endforeach; ?>
+                        </select></label>
                     </div>
-
-                    <!-- Date Range, Year, Month Filter Group -->
-                    <div class="flex flex-wrap lg:flex-nowrap items-center gap-2 w-full lg:w-auto">
-                        <div class="flex items-center gap-1">
-                            <span
-                                class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] whitespace-nowrap">From:</span>
-                            <input type="<?= $start_date ? 'date' : 'text' ?>" name="start_date"
-                                value="<?= htmlspecialchars($start_date) ?>" placeholder="From" data-placeholder="From"
-                                class="w-24 lg:w-20 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-[10px] text-[var(--text)] transition-all outline-none">
+                    <div class="inventory-filter-dates">
+                        <label class="inventory-filter-field" for="inventory-filter-from"><span>From date</span><input id="inventory-filter-from" type="<?= $start_date ? 'date' : 'text' ?>" name="start_date" value="<?= af_h($start_date) ?>" placeholder="Any date" data-placeholder="Any date"></label>
+                        <label class="inventory-filter-field" for="inventory-filter-to"><span>To date</span><input id="inventory-filter-to" type="<?= $end_date ? 'date' : 'text' ?>" name="end_date" value="<?= af_h($end_date) ?>" placeholder="Any date" data-placeholder="Any date"></label>
+                        <label class="inventory-filter-field" for="inventory-filter-year"><span>Year</span><select id="inventory-filter-year" name="filter_year"><option value="">All years</option>
+                            <?php $years = $pdo->query("SELECT DISTINCT strftime('%Y', created_at) FROM items WHERE created_at IS NOT NULL ORDER BY 1 DESC")->fetchAll(PDO::FETCH_COLUMN); foreach ($years as $yr): if (!$yr) continue; ?>
+                            <option value="<?= af_h($yr) ?>" <?= $filter_year === $yr ? 'selected' : '' ?>><?= af_h($yr) ?></option><?php endforeach; ?>
+                        </select></label>
+                        <label class="inventory-filter-field" for="inventory-filter-month"><span>Month</span><select id="inventory-filter-month" name="filter_month"><option value="">All months</option>
+                            <?php foreach (['01'=>'January','02'=>'February','03'=>'March','04'=>'April','05'=>'May','06'=>'June','07'=>'July','08'=>'August','09'=>'September','10'=>'October','11'=>'November','12'=>'December'] as $num => $month_name): ?>
+                            <option value="<?= $num ?>" <?= $filter_month === $num ? 'selected' : '' ?>><?= $month_name ?></option><?php endforeach; ?>
+                        </select></label>
+                    </div>
+                    <div class="inventory-filter-footer">
+                        <div class="inventory-filter-statuses" aria-label="Item status">
+                            <?php foreach (['Found'=>'Found','Lost'=>'Lost','Claimed'=>'Claims','Delivered'=>'Done'] as $value => $label): $selected_status = $status_f === $value || ($value === 'Found' && $status_f === ''); $status_params = array_merge($_GET, ['status_filter'=>$value, 'p'=>1]); ?>
+                            <a href="?<?= af_h(http_build_query($status_params)) ?>" <?= $selected_status ? 'aria-current="page"' : '' ?>><?= $label ?></a>
+                            <?php endforeach; ?>
                         </div>
-                        <div class="flex items-center gap-1">
-                            <span
-                                class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)] whitespace-nowrap">To:</span>
-                            <input type="<?= $end_date ? 'date' : 'text' ?>" name="end_date"
-                                value="<?= htmlspecialchars($end_date) ?>" placeholder="To" data-placeholder="To"
-                                class="w-24 lg:w-20 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-[10px] text-[var(--text)] transition-all outline-none">
-                        </div>
-                        <select name="filter_year"
-                            class="w-24 lg:w-20 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-[10px] text-[var(--text)] transition-all outline-none font-bold">
-                            <option value="">Year: All</option>
-                            <?php
-                            $years = $pdo->query("SELECT DISTINCT strftime('%Y', created_at) as yr FROM items WHERE created_at IS NOT NULL ORDER BY yr DESC")->fetchAll(PDO::FETCH_COLUMN);
-                            foreach ($years as $yr):
-                                if (!$yr)
-                                    continue; ?>
-                                <option value="<?= $yr ?>" <?= $filter_year === $yr ? 'selected' : '' ?>><?= $yr ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <select name="filter_month"
-                            class="w-24 lg:w-20 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-[10px] text-[var(--text)] transition-all outline-none font-bold">
-                            <option value="">Month: All</option>
-                            <?php
-                            $months = [
-                                '01' => 'Jan',
-                                '02' => 'Feb',
-                                '03' => 'Mar',
-                                '04' => 'Apr',
-                                '05' => 'May',
-                                '06' => 'Jun',
-                                '07' => 'Jul',
-                                '08' => 'Aug',
-                                '09' => 'Sep',
-                                '10' => 'Oct',
-                                '11' => 'Nov',
-                                '12' => 'Dec'
-                            ];
-                            foreach ($months as $num => $lbl): ?>
-                                <option value="<?= $num ?>" <?= $filter_month === $num ? 'selected' : '' ?>><?= $lbl ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                        <select name="airline_filter"
-                            class="w-32 lg:w-28 bg-[var(--bg)] border border-[var(--border)] rounded-lg px-2 py-1.5 text-[10px] text-[var(--text)] transition-all outline-none font-bold">
-                            <option value="">Airline: All</option>
-                            <?php foreach ($al as $airline): ?>
-                                <option value="<?= $airline['id'] ?>" <?= (string) $airline_filter === (string) $airline['id'] ? 'selected' : '' ?>><?= af_h($airline['name']) ?> (<?= af_h($airline['code']) ?>)</option>
-                            <?php endforeach; ?>
-                        </select>
+                        <div class="inventory-filter-actions"><a href="?<?= af_h(http_build_query($clear_filter_params)) ?>" class="inventory-filter-clear">Clear</a><button type="submit">Apply filters <span aria-hidden="true">→</span></button></div>
                     </div>
-
-                    <div class="flex items-center gap-1.5 w-full lg:w-auto shrink-0">
-                        <a href="?status_filter=Found"
-                            class="flex-grow lg:flex-none px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all <?= ($status_f == 'Found' || $status_f == '') ? 'bg-rose-500 text-white border-rose-500 shadow-lg shadow-rose-500/20' : 'bg-[var(--bg)] border-[var(--border)] text-[var(--secondary)]' ?>">Found</a>
-                        <a href="?status_filter=Lost"
-                            class="flex-grow lg:flex-none px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all <?= $status_f == 'Lost' ? 'bg-blue-500 text-white border-blue-500 shadow-lg shadow-blue-500/20' : 'bg-[var(--bg)] border-[var(--border)] text-[var(--secondary)]' ?>">Lost</a>
-                        <a href="?status_filter=Claimed"
-                            class="flex-grow lg:flex-none px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all <?= $status_f == 'Claimed' ? 'bg-indigo-500 text-white border-indigo-500 shadow-lg shadow-indigo-500/20' : 'bg-[var(--bg)] border-[var(--border)] text-[var(--secondary)]' ?>">Claims</a>
-                        <a href="?status_filter=Delivered"
-                            class="flex-grow lg:flex-none px-3 py-2 rounded-lg text-[9px] font-black uppercase tracking-widest border transition-all <?= $status_f == 'Delivered' ? 'bg-emerald-500 text-white border-emerald-500 shadow-lg shadow-emerald-500/20' : 'bg-[var(--bg)] border-[var(--border)] text-[var(--secondary)]' ?>">Done</a>
-                    </div>
-                    <button type="submit"
-                        class="w-full lg:w-auto px-4 py-2 bg-rose-500 text-white rounded-lg text-[9px] font-black uppercase tracking-widest hover:scale-105 transition-all shrink-0">Filter</button>
                 </form>
             </details>
 
             <!-- Inventory List -->
             <div
-                class="bg-[var(--card)] border border-[var(--border)] rounded-xl shadow-sm transition-colors overflow-hidden">
-                <div class="overflow-x-auto">
+                class="inventory-records bg-[var(--card)] border border-[var(--border)] rounded-xl shadow-sm transition-colors overflow-hidden">
+                <div class="inventory-records-heading"><div><h2>Item records</h2><p><?= (int) $total_matching ?> matching <?= (int) $total_matching === 1 ? 'record' : 'records' ?></p></div><span>Station <?= af_h($active_station) ?></span></div>
+                <?php if (empty($items)): ?>
+                    <div id="inventory-empty-state" role="status">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4 4M8 10.5h5"/></svg>
+                        <h3>No items found</h3>
+                        <p>No items match your current search or filters.</p>
+                        <a href="?<?= af_h(http_build_query($clear_filter_params)) ?>">Clear filters</a>
+                    </div>
+                <?php endif; ?>
+                <div class="overflow-x-auto <?= empty($items) ? 'hidden' : '' ?>">
                     <table class="staff-inventory-table w-full text-left table-fixed min-w-[1100px]">
                         <thead class="bg-[var(--bg)] border-b border-[var(--border)]">
                             <tr class="text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">
@@ -6666,8 +6893,9 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             </div>
                                             <div class="flex-grow min-w-0">
                                                 <p
-                                                    class="text-[7px] font-black text-rose-500 uppercase tracking-widest leading-none flex items-center gap-1.5 flex-wrap">
-                                                    <span><?= $item['tag_no'] ?></span>
+                                                    class="staff-item-reference-row text-[7px] font-black text-rose-500 uppercase tracking-widest leading-none flex items-center gap-1.5 flex-wrap">
+                                                    <?= af_staff_item_airline_logo($item, $al) ?>
+                                                    <span class="staff-item-id"><?= $item['tag_no'] ?></span>
                                                     <?php if (!empty($item['other_info'])):
                                                         $display_flight = $item['other_info'];
                                                         if (preg_match('/^([A-Z0-9]{2,3}\s*\d{1,4})/i', trim($display_flight), $matches)) {
@@ -6685,7 +6913,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                     form="form-<?= $item['tag_no'] ?>" required <?= $item_detail_readonly_attr ?>
                                                     class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[10px] font-bold text-[var(--text)] px-1 py-0.5 rounded w-full transition-all outline-none mt-0.5<?= $item_detail_input_class ?>">
                                                 <!-- Original Date exactly from database -->
-                                                <p class="text-[7px] text-[var(--secondary)] uppercase font-black mt-0.5 px-1">
+                                                <p class="staff-item-date text-[7px] text-[var(--secondary)] uppercase font-black mt-0.5 px-1">
                                                     <?= date('d M Y', strtotime($item['created_at'] ?? 'now')) ?>
                                                 </p>
                                             </div>
@@ -6716,6 +6944,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                             class="bg-transparent border-b border-transparent focus:border-rose-500/50 hover:bg-slate-500/5 focus:bg-[var(--input)] text-[8px] font-bold text-[var(--secondary)] px-1 py-0.5 rounded w-full transition-all outline-none mt-0.5<?= $pax_input_class ?>">
                                     </td>
                                     <td class="px-2 py-1" data-label="Internal">
+                                        <p class="desktop-note-preview"><?= af_h(af_latest_note_text((string) ($item['user_comments'] ?? '')) ?: 'No notes yet') ?></p>
                                         <div
                                             class="text-[9px] text-[var(--secondary)] max-h-14 overflow-y-auto custom-scroll px-1">
                                             <?= af_notes_for_display((string) ($item['user_comments'] ?? '')) ?>
@@ -6731,6 +6960,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                         <?php endif; ?>
                                     </td>
                                     <td class="px-2 py-1" data-label="Handover">
+                                        <p class="desktop-note-preview"><?= af_h(af_latest_note_text((string) ($item['delivery_info'] ?? '')) ?: 'No notes yet') ?></p>
                                         <div
                                             class="text-[9px] text-[var(--secondary)] max-h-14 overflow-y-auto custom-scroll px-1">
                                             <?= af_notes_for_display((string) ($item['delivery_info'] ?? '')) ?>
@@ -6775,7 +7005,7 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                     <path stroke-linecap="round" stroke-linejoin="round"
                                                         d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v6m3-3H7" />
                                                 </svg>
-                                            </button>
+                                            <span class="desktop-action-label">Details</span></button>
 
                                             <?php if ($can_edit_items): ?>
                                                 <form class="inline">
@@ -6787,8 +7017,12 @@ $items = $stmt->fetchAll(PDO::FETCH_ASSOC);
                                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                                 d="M8 4H6a2 2 0 00-2 2v12a2 2 0 002 2h12a2 2 0 002-2V8l-4-4H8zm0 0v4h6V4M8 20v-6h8v6" />
                                                         </svg>
-                                                    </button>
+                                                    <span class="desktop-action-label">Save</span></button>
                                                 </form>
+                                            <?php endif; ?>
+
+                                            <?php if (af_fee_policy($db_settings)['visible'] && in_array($item['status'], ['Found', 'Claimed'], true)): ?>
+                                                <button type="button" onclick="openFeeEstimator(<?= af_h(json_encode($item['tag_no'])) ?>)" title="Estimate handover cost" aria-label="Estimate handover cost" class="w-6 h-6 flex items-center justify-center bg-[var(--input)] border border-[var(--border)] rounded-md font-bold">≈</button>
                                             <?php endif; ?>
 
                                             <?php if ($can_edit_items && $is_claimed && !$claim_approved): ?>

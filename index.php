@@ -178,59 +178,27 @@ $active_station = af_get_current_station();
             transform: scale(1.02);
         }
 
-        /* Bulletproof Dynamic Card Styles */
-        .item-card-el {
-            height: 270px;
-            display: flex;
-            flex-direction: column;
-            background: var(--card);
-            border: 1px solid var(--border);
-            border-radius: 2rem;
-            overflow: hidden;
-            transition: all 0.5s cubic-bezier(0.16, 1, 0.3, 1);
-        }
-
-        .item-card-el:hover {
-            border-color: rgba(244, 63, 94, 0.3);
-            box-shadow: 0 25px 50px -12px rgba(244, 63, 94, 0.08);
-            transform: translateY(-4px) scale(1.01);
-        }
-
-        .item-card-image-wrap {
-            height: 160px;
-            position: relative;
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: var(--input);
-        }
-
-        .sensitive-doc-photo {
-            filter: blur(12px);
-            transform: scale(1.06);
-            pointer-events: none;
-        }
-
-        .sensitive-doc-overlay {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(15, 23, 42, 0.2);
-            z-index: 6;
-        }
-
-        .item-card-body {
-            padding: 0.75rem;
-            height: 110px;
-            flex-shrink: 0;
-            display: flex;
-            flex-direction: column;
-            justify-content: space-between;
-            box-sizing: border-box;
-        }
+        /* Public item cards: recognisable photos, readable details, clear claim action. */
+        #item-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); align-content: start; align-items: stretch; }
+        .item-card-el { align-self: stretch; min-width: 0; display: flex; flex-direction: column; background: var(--card); border: 1px solid var(--border); border-radius: 1.25rem; overflow: hidden; transition: border-color .2s, box-shadow .2s; }
+        .item-card-el:hover { border-color: #f43f5e66; box-shadow: 0 12px 32px #0f172a0a; }
+        .item-card-image-wrap { height: 190px; position: relative; display: flex; align-items: center; justify-content: center; background: var(--input); flex-shrink: 0; }
+        .item-photo-button { width: 100%; height: 100%; padding: 12px; cursor: zoom-in; }
+        .item-photo-button img { width: 100%; height: 100%; object-fit: contain; border-radius: .6rem; }
+        .item-photo-hint { position: absolute; right: 10px; bottom: 10px; padding: 4px 8px; border-radius: 20px; background: var(--card); color: var(--secondary); font-size: 10px; pointer-events: none; }
+        .item-status-badge { position: absolute; top: 12px; left: 12px; padding: 5px 9px; border-radius: 20px; font-size: 10px; font-weight: 800; background: var(--card); color: #059669; box-shadow: 0 2px 8px #0f172a0a; pointer-events: none; }
+        .item-card-body { display: flex; flex: 1; flex-direction: column; padding: 16px; gap: 10px; }
+        .item-category { color: var(--secondary); font-size: 10px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; }
+        .item-card-body h4 { min-height: 2.8em; font-size: 15px; font-weight: 700; line-height: 1.4; color: var(--text); overflow-wrap: anywhere; white-space: pre-line; }
+        .item-card-meta { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 5px; color: var(--secondary); font-size: 11px; padding-top: 10px; margin-top: auto; border-top: 1px solid var(--border); }
+        .item-card-body .claim-btn { width: 100%; min-height: 40px; padding: 10px; border-radius: 10px; font-size: 12px; font-weight: 800; color: white; background: #f43f5e; transition: background .2s; }
+        .item-card-body .claim-btn:hover { background: #e11d48; }
+        .item-card-body .claim-btn:disabled { color: var(--secondary); background: var(--input); cursor: default; }
+        .item-empty-photo { text-align: center; color: var(--secondary); font-size: 12px; padding: 20px; }
+        .item-empty-photo svg { width: 36px; height: 36px; margin: 0 auto 10px; opacity: .45; }
+        .item-claim-note { margin: 0 0 12px; color: var(--secondary); font-size: 12px; line-height: 1.5; }
+        #claim-modal label:not(:has(input[type="checkbox"])) { font-size: 11px; }
+        #claim-modal input, #claim-modal textarea { color: var(--text); }
 
         details.filter-panel>summary {
             list-style: none;
@@ -276,127 +244,12 @@ $active_station = af_get_current_station();
                 padding: 0.5rem 0.65rem !important;
             }
 
-            .item-card-el {
-                height: 218px;
-                border-radius: 1rem;
-            }
-
-            .item-card-image-wrap {
-                height: 104px !important;
-            }
-
-            .item-card-body {
-                height: 114px;
-                padding: 0.55rem;
-            }
-
-            .item-card-body h4 {
-                font-size: 0.66rem;
-                line-height: 1.08;
-            }
-
-            .item-card-body p {
-                font-size: 0.48rem;
-            }
-
-            .item-card-body span {
-                font-size: 0.4rem;
-                line-height: 1.05;
-            }
-
-            .item-card-body .item-card-meta span:last-child {
-                font-size: 0.42rem;
-            }
-
-            .item-card-body .item-card-meta {
-                gap: 0.45rem;
-            }
-
-            .item-card-body .item-card-footer {
-                align-items: flex-end;
-                gap: 0.35rem;
-            }
-
-            .item-card-body .claim-btn {
-                padding: 0.4rem 0.45rem;
-                max-width: 4.6rem;
-                font-size: 0.45rem;
-                letter-spacing: 0.08em;
-                line-height: 1;
-                white-space: normal;
-            }
-
-            .item-status-badge {
-                top: 0.5rem;
-                left: 0.5rem;
-                max-width: calc(100% - 1rem);
-                padding: 0.28rem 0.45rem;
-                font-size: 0.42rem;
-                letter-spacing: 0.08em;
-                line-height: 1;
-                white-space: nowrap;
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }
-
-            .item-card-image-wrap .missing-icon {
-                width: 1.75rem;
-                height: 1.75rem;
-                margin-bottom: 0.25rem;
-            }
-
-            .item-card-image-wrap .missing-icon svg {
-                width: 0.9rem;
-                height: 0.9rem;
-            }
-
-            .item-card-image-wrap .missing-text {
-                font-size: 0.36rem;
-                letter-spacing: 0.22em;
-            }
-
-            html[data-card-layout="single"] .item-card-el {
-                height: 270px;
-            }
-
-            html[data-card-layout="single"] .item-card-image-wrap {
-                height: 150px !important;
-            }
-
-            html[data-card-layout="single"] .item-card-body {
-                height: 120px;
-                padding: 0.75rem;
-            }
-
-            html[data-card-layout="single"] .item-card-body h4 {
-                font-size: 0.82rem;
-                line-height: 1.15;
-            }
-
-            html[data-card-layout="single"] .item-card-body p {
-                font-size: 0.62rem;
-            }
-
-            html[data-card-layout="single"] .item-card-body span {
-                font-size: 0.52rem;
-                line-height: 1.1;
-            }
-
-            html[data-card-layout="single"] .item-card-body .item-card-meta span:last-child {
-                font-size: 0.58rem;
-            }
-
-            html[data-card-layout="single"] .item-card-body .claim-btn {
-                max-width: none;
-                padding: 0.5rem 0.8rem;
-                font-size: 0.55rem;
-                white-space: nowrap;
-            }
-
-            html[data-card-layout="single"] .item-status-badge {
-                font-size: 0.5rem;
-                padding: 0.35rem 0.65rem;
-            }
+            .item-card-image-wrap { height: 140px; }
+            .item-card-body { padding: 12px; gap: 8px; }
+            .item-card-body h4 { font-size: 13px; }
+            .item-card-meta { font-size: 10px; }
+            .item-photo-button { padding: 8px; }
+            html[data-card-layout="single"] .item-card-image-wrap { height: 210px; }
         }
 
         @media (max-width: 420px) {
@@ -675,7 +528,7 @@ $active_station = af_get_current_station();
         <div id="airline-view"
             class="view-transition absolute inset-0 p-3 md:p-5 overflow-y-auto custom-scroll <?= $passenger_has_station ? '' : 'hidden-view' ?>">
             <div class="mb-4 relative max-w-md mx-auto md:mx-0">
-                <input type="text" id="airline-search" placeholder="Search airline or flight..."
+                <input type="text" id="airline-search" placeholder="Search airline..."
                     class="w-full bg-[var(--input)] border border-[var(--border)] rounded-lg px-10 py-1.5 text-xs text-[var(--text)] focus:border-rose-500/50 transition-all outline-none"
                     oninput="filterAirlines(this.value)">
                 <span class="absolute left-4 top-1/2 -translate-y-1/2 opacity-30 text-xs">🔍</span>
@@ -760,8 +613,9 @@ $active_station = af_get_current_station();
                 </details>
             </div>
 
+            <p class="item-claim-note">Recognise your item? Select <strong>Claim Item</strong>. Flight, seat, contents and contact details stay private so our team can confirm ownership.</p>
             <div id="item-grid"
-                class="flex-grow min-h-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 items-start gap-3 md:gap-4 overflow-y-auto custom-scroll pr-2 pb-6">
+                class="flex-grow min-h-0 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 items-stretch gap-3 md:gap-4 overflow-y-auto custom-scroll pr-2 pb-6">
                 <!-- Loaded via JS -->
             </div>
         </div>
@@ -896,17 +750,18 @@ $active_station = af_get_current_station();
     <!-- Claim Item Modal -->
     <div id="claim-modal"
         class="fixed inset-0 bg-slate-900/60 backdrop-blur-md z-[200] hidden items-center justify-center p-6">
-        <div class="glass max-w-md w-full p-10 rounded-[3rem] relative animate-fade-in">
+        <div class="glass max-w-md w-full p-6 sm:p-8 rounded-[2rem] relative animate-fade-in max-h-[90dvh] overflow-y-auto">
             <button onclick="closeClaimModal()"
                 class="absolute top-8 right-8 text-slate-500 hover:text-white text-2xl font-bold">×</button>
             <div class="flex items-center gap-4 mb-6">
                 <div>
-                    <h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">Claim Found Item</h2>
+                    <h2 class="font-black text-lg uppercase tracking-tight text-[var(--text)]">Claim Item</h2>
                     <p id="claim-item-subtitle"
                         class="text-[8px] font-black uppercase tracking-widest text-slate-500 mt-1">Item Ref: </p>
                 </div>
             </div>
 
+            <p class="text-xs text-[var(--secondary)] mb-5">Think this is yours? Share your contact details and one detail that is not visible in the listing. Our team will confirm ownership before collection.</p>
             <form id="claim-item-form" class="space-y-4" onsubmit="submitClaim(event)">
                 <input type="hidden" name="tag_no" id="claim-tag-input">
 
@@ -927,24 +782,43 @@ $active_station = af_get_current_station();
                 </div>
 
                 <div class="space-y-1">
-                    <label class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">Contact
-                        Phone Number</label>
-                    <input type="tel" name="pax_contact" required
+                    <label class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">Phone Number (optional)</label>
+                    <input type="tel" name="pax_contact" maxlength="100"
                         class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-4 py-3 text-xs text-[var(--text)] outline-none focus:border-rose-500/50"
                         placeholder="+1 234 567 890">
                 </div>
 
-                <div class="space-y-1">
-                    <label class="block text-[8px] font-black uppercase tracking-widest text-[var(--secondary)]">Flight
-                        Seat / Evidence of Ownership</label>
-                    <textarea name="seat_info" required rows="3"
-                        class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-4 py-3 text-xs text-[var(--text)] outline-none focus:border-rose-500/50 resize-none"
-                        placeholder="Provide seat number (e.g. 14F), boarding pass details, or distinct marks..."></textarea>
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="space-y-1">
+                        <label for="claim-flight" class="block text-xs font-bold">Flight number</label>
+                        <input id="claim-flight" name="flight_number" required maxlength="12" placeholder="e.g. LH123" class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-3 py-3 text-xs">
+                    </div>
+                    <div class="space-y-1">
+                        <label for="claim-date" class="block text-xs font-bold">Travel date</label>
+                        <input id="claim-date" type="date" name="flight_date" required max="<?= gmdate('Y-m-d') ?>" class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-3 py-3 text-xs">
+                    </div>
                 </div>
+                <div class="space-y-1">
+                    <label for="claim-seat" class="block text-xs font-bold">Seat number (if known)</label>
+                    <input id="claim-seat" name="seat_info" maxlength="100" placeholder="e.g. 14F" class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-4 py-3 text-xs">
+                </div>
+                <div class="space-y-1">
+                    <label for="claim-evidence" class="block text-xs font-bold">How can we confirm it is yours?</label>
+                    <textarea id="claim-evidence" name="ownership_details" required minlength="10" maxlength="2000" rows="3" aria-describedby="claim-evidence-help" class="w-full bg-[var(--input)] border border-[var(--border)] rounded-xl px-4 py-3 text-xs" placeholder="For example: something inside, a hidden mark, or a detail not shown in the photo."></textarea>
+                    <p id="claim-evidence-help" class="text-xs text-[var(--secondary)]">One extra detail is enough to start. Keep passwords, PINs, card and passport numbers private.</p>
+                </div>
+                <label class="flex items-start gap-3 text-xs text-[var(--secondary)]">
+                    <input type="checkbox" name="ownership_confirmation" value="1" required class="mt-1 shrink-0">
+                    <span>This is my item, or I am claiming for its owner. I understand staff will confirm ownership before collection.</span>
+                </label>
+                <label class="flex items-start gap-3 text-xs text-[var(--secondary)]">
+                    <input type="checkbox" name="privacy_consent" value="1" required class="mt-1 shrink-0">
+                    <span>I agree to my details being used to process this claim. <a href="privacy.php" target="_blank" rel="noopener" class="underline">Privacy notice</a></span>
+                </label>
 
                 <button type="submit" id="claim-submit-btn"
                     class="w-full bg-rose-500 hover:bg-rose-600 text-white py-4 rounded-xl font-black text-[10px] uppercase tracking-[0.15em] shadow-lg shadow-rose-500/20 transition-all flex items-center justify-center gap-2">
-                    Submit Property Claim
+                    Claim Item
                 </button>
             </form>
         </div>
@@ -1280,65 +1154,35 @@ $active_station = af_get_current_station();
                 card.setAttribute('data-created-at', item.created_at || '');
 
                 const canClaim = item.status === 'Found';
-                const statusLabel = item.status === 'Found' ? 'READY FOR CLAIM' : (item.status === 'Claimed' ? 'CLAIMED' : 'REPORTED LOST');
-                const statusColor = item.status === 'Found' ? 'bg-emerald-500' : (item.status === 'Claimed' ? 'bg-indigo-500' : 'bg-rose-500');
                 const photoPath = String(item.photo || '');
                 const photoUrl = photoPath ? safeUrl(/^https?:\/\//i.test(photoPath) ? photoPath : `uploads/cabin_items/${photoPath}`) : null;
-                const flightNumber = escapeHtml(formatFlightNumber(item.flight_number, airlineName));
-                const isIdentityDocument = Boolean(item.is_identity_document) || /^PP-/i.test(item.reference_code || item.id || '');
+                const isIdentityDocument = Boolean(item.is_identity_document);
                 const referenceCode = escapeHtml(item.reference_code || item.id || 'N/A');
-                const rawReferenceCode = String(item.reference_code || item.id || '');
-                const itemDescription = escapeHtml(item.item_description || '');
+                const itemDescription = escapeHtml(item.item_description || 'Personal item');
                 const createdDate = item.created_at ? escapeHtml(String(item.created_at).split(' ')[0]) : 'N/A';
-
                 card.innerHTML = `
-                    <div class="item-card-image-wrap bg-[var(--input)] flex items-center justify-center overflow-hidden relative w-full h-[160px] shrink-0">
+                    <div class="item-card-image-wrap">
                         ${photoUrl ? `
-                            <img src="${photoUrl}" ${isIdentityDocument ? '' : 'onclick="zoomImage(this.src)"'} class="w-full h-full object-cover transition-transform duration-700 ${isIdentityDocument ? 'sensitive-doc-photo' : 'group-hover/item:scale-110 cursor-pointer'}" loading="lazy" decoding="async" data-smooth-image>
-                            ${isIdentityDocument ? `
-                                <div class="sensitive-doc-overlay">
-                                    <span class="px-3 py-1.5 rounded-full bg-slate-950/70 text-white text-[7px] font-black uppercase tracking-widest shadow-lg">Image Protected</span>
-                                </div>
-                            ` : ''}
+                            <button type="button" class="item-photo-button" aria-label="Enlarge item photo">
+                                <img src="${photoUrl}" alt="${itemDescription}" loading="lazy" decoding="async" data-smooth-image>
+                            </button>
+                            <span class="item-photo-hint">Enlarge photo ↗</span>
                         ` : `
-                            <div class="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
-                                <div class="missing-icon w-10 h-10 rounded-full bg-rose-500/5 flex items-center justify-center mb-2 group-hover/item:scale-110 transition-transform duration-500">
-                                    <svg class="text-rose-500 opacity-20 group-hover/item:opacity-40 transition-opacity w-5 h-5" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7.5 4.27 9 5.15"/><path d="M21 8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16Z"/><path d="m3.3 7 8.7 5 8.7-5"/><path d="M12 22V12"/></svg>
-                                </div>
-                                <span class="missing-text text-[6px] font-black uppercase tracking-[0.4em] opacity-30 group-hover/item:opacity-50 transition-opacity">Digital Evidence Missing</span>
-                                <div class="absolute inset-0 bg-gradient-to-t from-[var(--input)] to-transparent opacity-60"></div>
+                            <div class="item-empty-photo">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="m3 16 5-5 4 4 3-3 6 6"/><circle cx="15" cy="8" r="1"/></svg>
+                                ${isIdentityDocument ? 'Document photo protected' : 'Photo not available'}
                             </div>
                         `}
-                        <div class="item-status-badge absolute top-3 left-3 ${statusColor} text-white text-[7px] font-black px-2.5 py-1 rounded-full shadow-lg uppercase tracking-widest z-10">
-                            ${statusLabel}
-                        </div>
+                        <span class="item-status-badge" style="${canClaim ? '' : 'color:var(--secondary)'}">${canClaim ? '● Found' : 'Reported lost'}</span>
                     </div>
                     <div class="item-card-body">
-                        <div class="flex items-start justify-between">
-                            <div>
-                                <p class="text-[9px] font-black text-rose-500 uppercase tracking-widest leading-none mb-1">${referenceCode}</p>
-                                <h4 class="font-bold text-[var(--text)] text-xs leading-tight line-clamp-2">${itemDescription}</h4>
-                            </div>
-                        </div>
-                        <div class="item-card-footer pt-2 flex items-center justify-between gap-3 border-t border-[var(--border)]">
-                            <div class="item-card-meta flex min-w-0 items-center gap-4">
-                                <div class="flex flex-col shrink-0">
-                                    <span class="text-[7px] font-black uppercase text-[var(--secondary)] tracking-widest mb-0.5">Last Update</span>
-                                    <span class="text-[9px] font-bold text-[var(--text)]">${createdDate}</span>
-                                </div>
-                                <div class="flex min-w-0 flex-col">
-                                    <span class="text-[7px] font-black uppercase text-[var(--secondary)] tracking-widest mb-0.5">Flight</span>
-                                    <span class="truncate text-[9px] font-bold uppercase text-[var(--text)]">${flightNumber}</span>
-                                </div>
-                            </div>
-                            ${canClaim ? `
-                                <button onclick="openClaimModal('${escapeHtml(rawReferenceCode)}', '${encodeURIComponent(item.item_description || '')}')" class="claim-btn shrink-0 px-3.5 py-1.5 bg-rose-500/10 hover:bg-rose-500 text-rose-500 hover:text-white rounded-lg text-[8px] font-black uppercase tracking-widest transition-all">Claim Item</button>
-                            ` : `
-                                <button disabled class="claim-btn shrink-0 px-3.5 py-1.5 bg-slate-800 text-slate-500 rounded-lg text-[8px] font-black uppercase tracking-widest cursor-not-allowed">${item.status}</button>
-                            `}
-                        </div>
-                    </div>
-                `;
+                        <div class="item-category">${escapeHtml(item.item_category || 'Personal item')}</div>
+                        <h4>${itemDescription}</h4>
+                        <div class="item-card-meta"><span>Ref. ${referenceCode}</span><span>Added ${createdDate}</span></div>
+                        <button type="button" class="claim-btn" ${canClaim ? '' : 'disabled'}>${canClaim ? 'Claim Item' : 'Reported lost'}</button>
+                    </div>`;
+                card.querySelector('.item-photo-button')?.addEventListener('click', () => zoomImage(photoUrl));
+                if (canClaim) card.querySelector('.claim-btn').addEventListener('click', () => openClaimModal(String(item.reference_code || item.id || ''), encodeURIComponent(item.item_description || '')));
                 grid.appendChild(card);
                 enhanceSmoothImages(card);
             });
